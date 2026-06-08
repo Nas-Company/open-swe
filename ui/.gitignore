@@ -13,3 +13,4 @@ count.txt
 dev-dist
 __unconfig*
 todos.json
+.vercel
