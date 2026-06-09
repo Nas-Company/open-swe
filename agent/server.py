@@ -28,7 +28,6 @@ from deepagents.backends.protocol import SandboxBackendProtocol
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT, SubAgent
 from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain_core.language_models import BaseChatModel
-from langsmith.sandbox import SandboxClientError
 
 from .dashboard.agent_overrides import (
     load_profile,
@@ -84,6 +83,7 @@ from .utils.model import (
     provider_model_kwargs,
 )
 from .utils.sandbox import create_sandbox
+from .utils.sandbox_errors import is_retryable_sandbox_connection_error
 from .utils.sandbox_paths import aresolve_sandbox_work_dir
 
 client = get_client()
@@ -241,17 +241,20 @@ async def check_or_recreate_sandbox(
     """Check if a cached sandbox is reachable; recreate it if not.
 
     Pings the sandbox with a lightweight command. If the sandbox is
-    unreachable (SandboxClientError), it is torn down and a fresh one
-    is created via _recreate_sandbox.
+    unreachable, it is torn down and a fresh one is created via
+    _recreate_sandbox.
 
     Returns the original backend if healthy, or a new one if recreated.
     """
     try:
         await asyncio.to_thread(sandbox_backend.execute, "echo ok")
-    except SandboxClientError:
+    except Exception as exc:
+        if not is_retryable_sandbox_connection_error(exc):
+            raise
         logger.warning(
             "Cached sandbox is no longer reachable for thread %s, recreating",
             thread_id,
+            exc_info=True,
         )
         sandbox_backend = await _recreate_sandbox(thread_id, github_proxy_token=github_proxy_token)
     return sandbox_backend
@@ -313,7 +316,7 @@ async def ensure_sandbox_for_thread(
 
     Implements the four-state lifecycle described in AGENTS.md:
 
-    1. Cached in memory → ping; recreate on ``SandboxClientError``.
+    1. Cached in memory → ping; recreate on retryable sandbox connection errors.
     2. Metadata says ``__creating__`` and no cache → wait for the creating
        worker; only reset if the sentinel is proven stale (timestamp/timeout).
     3. No sandbox at all → create one and persist the id.

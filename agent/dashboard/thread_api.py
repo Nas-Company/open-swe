@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
@@ -221,12 +222,16 @@ def _metadata_repo(metadata: dict[str, Any]) -> tuple[str, str, str]:
 
 
 def _run_status_to_agent_status(thread_status: str | None, run_status: str | None) -> str:
-    if thread_status == "busy" or run_status in {"pending", "running"}:
+    if thread_status == "busy" or run_status == "running":
         return "running"
     if run_status in {"interrupted", "cancelled"}:
         return "interrupted"
+    if thread_status == "error":
+        return "error"
     if run_status in {"error", "failed", "timeout"}:
         return "error"
+    if run_status == "pending":
+        return "running"
     if run_status == "success":
         return "finished"
     return "idle"
@@ -292,6 +297,23 @@ async def _latest_run_status(thread_id: str) -> str | None:
     return raw.lower() if isinstance(raw, str) else None
 
 
+async def _thread_with_latest_run_status(thread: dict[str, Any]) -> dict[str, Any]:
+    thread_id = thread.get("thread_id") or thread.get("id")
+    if not isinstance(thread_id, str):
+        return thread
+    try:
+        latest_run_status = await _latest_run_status(thread_id)
+    except Exception:
+        logger.debug("Failed to load latest run status for thread %s", thread_id, exc_info=True)
+        return thread
+    if not latest_run_status:
+        return thread
+    metadata = thread.get("metadata") if isinstance(thread.get("metadata"), dict) else {}
+    if latest_run_status == metadata.get("latest_run_status"):
+        return thread
+    return {**thread, "metadata": {**metadata, "latest_run_status": latest_run_status}}
+
+
 async def list_dashboard_threads(
     login: str, *, email: str | None = None, limit: int = 50, include_all: bool = False
 ) -> list[dict[str, Any]]:
@@ -318,7 +340,10 @@ async def list_dashboard_threads(
             if isinstance(thread_id, str) and thread_id not in seen:
                 seen[thread_id] = thread
 
-    summaries = [_thread_summary(thread) for thread in seen.values()]
+    threads_with_run_status = await asyncio.gather(
+        *(_thread_with_latest_run_status(thread) for thread in seen.values())
+    )
+    summaries = [_thread_summary(thread) for thread in threads_with_run_status]
     summaries.sort(key=lambda item: item.get("updatedAt", 0), reverse=True)
     return summaries[:limit]
 
@@ -333,8 +358,6 @@ async def get_dashboard_thread(
         logger.debug("Thread lookup failed for %s", thread_id, exc_info=True)
         raise HTTPException(404, "thread not found") from exc
 
-    metadata = thread.get("metadata") if isinstance(thread.get("metadata"), dict) else {}
-
     messages: list[dict[str, Any]] = []
     try:
         state = await client.threads.get_state(thread_id)
@@ -348,10 +371,7 @@ async def get_dashboard_thread(
         raw_messages = values.get("messages") if isinstance(values, dict) else []
         messages = state_messages_to_ui(raw_messages if isinstance(raw_messages, list) else [])
 
-    latest_run_status = await _latest_run_status(thread_id)
-    if latest_run_status and latest_run_status != metadata.get("latest_run_status"):
-        metadata = {**metadata, "latest_run_status": latest_run_status}
-        thread = {**thread, "metadata": metadata}
+    thread = await _thread_with_latest_run_status(thread)
 
     return _thread_summary(thread, messages=messages)
 

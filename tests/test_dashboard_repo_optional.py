@@ -49,6 +49,66 @@ def test_thread_summary_reports_interrupted_run_status() -> None:
     assert summary["status"] == "interrupted"
 
 
+def test_thread_summary_reports_thread_error_status() -> None:
+    summary = thread_api._thread_summary(
+        {
+            "thread_id": "t4",
+            "status": "error",
+            "metadata": {"latest_run_status": "pending"},
+        }
+    )
+    assert summary["status"] == "error"
+
+    summary = thread_api._thread_summary({"thread_id": "t5", "status": "error", "metadata": {}})
+    assert summary["status"] == "error"
+
+
+class _ThreadListThreadsClient:
+    async def search(
+        self,
+        *,
+        metadata: dict[str, Any],
+        limit: int,
+        sort_by: str,
+        sort_order: str,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "thread_id": "thread-stale",
+                "status": "idle",
+                "metadata": {
+                    "source": "dashboard",
+                    "github_login": "octo",
+                    "title": "stale pending",
+                    "latest_run_status": "pending",
+                    "updated_at_ms": 10,
+                },
+            }
+        ]
+
+
+class _ThreadListRunsClient:
+    async def list(self, thread_id: str, *, limit: int) -> list[dict[str, str]]:
+        assert thread_id == "thread-stale"
+        assert limit == 1
+        return [{"run_id": "run-error", "status": "error"}]
+
+
+class _ThreadListClient:
+    def __init__(self) -> None:
+        self.threads = _ThreadListThreadsClient()
+        self.runs = _ThreadListRunsClient()
+
+
+async def test_list_dashboard_threads_uses_latest_run_status(monkeypatch) -> None:
+    monkeypatch.setattr(thread_api, "langgraph_client", lambda: _ThreadListClient())
+
+    summaries = await thread_api.list_dashboard_threads("octo")
+
+    assert summaries[0]["id"] == "thread-stale"
+    assert summaries[0]["status"] == "error"
+
+
 class _FakeThreadsClient:
     async def create(
         self, *, thread_id: str, metadata: dict[str, Any], if_exists: str

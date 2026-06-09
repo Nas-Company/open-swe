@@ -238,6 +238,55 @@ class TestCreateSandboxWithProxy:
                 await _create_sandbox_with_proxy()
 
 
+class ModalNotFoundError(Exception):
+    pass
+
+
+ModalNotFoundError.__name__ = "NotFoundError"
+ModalNotFoundError.__module__ = "modal.exception"
+
+
+class TestSandboxHealthCheck:
+    @pytest.mark.asyncio
+    async def test_modal_missing_container_recreates_sandbox(self) -> None:
+        old_sandbox = MagicMock(id="sb-old")
+        replacement_sandbox = MagicMock(id="sb-new")
+        old_sandbox.execute.side_effect = ModalNotFoundError(
+            "Modal Sandbox with container ID ta-123 not found. "
+            "This means this Sandbox has already shut down."
+        )
+
+        with patch(
+            "agent.server._recreate_sandbox",
+            new_callable=AsyncMock,
+            return_value=replacement_sandbox,
+        ) as mock_recreate:
+            from agent.server import check_or_recreate_sandbox
+
+            sandbox = await check_or_recreate_sandbox(
+                old_sandbox,
+                "thread-123",
+                github_proxy_token="ghs_proxy",
+            )
+
+        assert sandbox is replacement_sandbox
+        old_sandbox.execute.assert_called_once_with("echo ok")
+        mock_recreate.assert_awaited_once_with(
+            "thread-123",
+            github_proxy_token="ghs_proxy",
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_sandbox_health_check_errors_still_raise(self) -> None:
+        old_sandbox = MagicMock(id="sb-old")
+        old_sandbox.execute.side_effect = RuntimeError("command serialization failed")
+
+        from agent.server import check_or_recreate_sandbox
+
+        with pytest.raises(RuntimeError, match="command serialization failed"):
+            await check_or_recreate_sandbox(old_sandbox, "thread-123")
+
+
 class _DummyAgent:
     def with_config(self, config):
         return self

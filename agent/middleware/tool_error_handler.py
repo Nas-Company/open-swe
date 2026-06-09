@@ -20,7 +20,8 @@ from langchain_core.messages import ToolMessage
 from langgraph.config import get_config
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
-from langsmith.sandbox import SandboxClientError
+
+from agent.utils.sandbox_errors import is_retryable_sandbox_connection_error
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ def _to_error_payload(e: Exception, request: ToolCallRequest | None = None) -> d
 
 
 def _to_sandbox_recreated_payload(
-    e: SandboxClientError,
+    e: Exception,
     sandbox_id: str,
     request: ToolCallRequest | None = None,
 ) -> dict[str, str]:
@@ -135,7 +136,7 @@ def _recreate_sandbox_for_thread_sync(thread_id: str) -> str:
 
 
 def _sandbox_recreated_tool_message(
-    e: SandboxClientError,
+    e: Exception,
     sandbox_id: str,
     request: ToolCallRequest,
 ) -> ToolMessage:
@@ -173,17 +174,17 @@ class ToolErrorMiddleware(AgentMiddleware):
     ) -> ToolMessage | Command:
         try:
             return handler(request)
-        except SandboxClientError as e:
-            logger.exception("Sandbox error during tool call handling; request=%r", request)
-            thread_id = _get_thread_id(request)
-            if thread_id:
-                try:
-                    sandbox_id = _recreate_sandbox_for_thread_sync(thread_id)
-                    return _sandbox_recreated_tool_message(e, sandbox_id, request)
-                except Exception:
-                    logger.exception("Failed to recreate sandbox for thread %s", thread_id)
-            return _generic_error_tool_message(e, request)
         except Exception as e:
+            if is_retryable_sandbox_connection_error(e):
+                logger.exception("Sandbox error during tool call handling; request=%r", request)
+                thread_id = _get_thread_id(request)
+                if thread_id:
+                    try:
+                        sandbox_id = _recreate_sandbox_for_thread_sync(thread_id)
+                        return _sandbox_recreated_tool_message(e, sandbox_id, request)
+                    except Exception:
+                        logger.exception("Failed to recreate sandbox for thread %s", thread_id)
+                return _generic_error_tool_message(e, request)
             logger.exception("Error during tool call handling; request=%r", request)
             return _generic_error_tool_message(e, request)
 
@@ -194,16 +195,16 @@ class ToolErrorMiddleware(AgentMiddleware):
     ) -> ToolMessage | Command:
         try:
             return await handler(request)
-        except SandboxClientError as e:
-            logger.exception("Sandbox error during tool call handling; request=%r", request)
-            thread_id = _get_thread_id(request)
-            if thread_id:
-                try:
-                    sandbox_id = await _recreate_sandbox_for_thread(thread_id)
-                    return _sandbox_recreated_tool_message(e, sandbox_id, request)
-                except Exception:
-                    logger.exception("Failed to recreate sandbox for thread %s", thread_id)
-            return _generic_error_tool_message(e, request)
         except Exception as e:
+            if is_retryable_sandbox_connection_error(e):
+                logger.exception("Sandbox error during tool call handling; request=%r", request)
+                thread_id = _get_thread_id(request)
+                if thread_id:
+                    try:
+                        sandbox_id = await _recreate_sandbox_for_thread(thread_id)
+                        return _sandbox_recreated_tool_message(e, sandbox_id, request)
+                    except Exception:
+                        logger.exception("Failed to recreate sandbox for thread %s", thread_id)
+                return _generic_error_tool_message(e, request)
             logger.exception("Error during tool call handling; request=%r", request)
             return _generic_error_tool_message(e, request)
