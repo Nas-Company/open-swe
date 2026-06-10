@@ -154,6 +154,12 @@ export function useAgentThreadStream(threadId: string, enabled: boolean) {
         if (!controller.signal.aborted) {
           console.debug("agent thread stream closed", error);
         }
+      } finally {
+        if (!cancelled) {
+          queryClient.invalidateQueries({
+            queryKey: agentThreadKeys.detail(threadId),
+          });
+        }
       }
     }
 

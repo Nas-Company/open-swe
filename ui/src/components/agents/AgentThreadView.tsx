@@ -67,12 +67,16 @@ export function AgentThreadView({ user, thread }: AgentThreadViewProps) {
   useEffect(() => {
     setPendingPrompts((prev) => {
       if (prev.length === 0) return prev;
+      if (thread.status !== "running") {
+        const next = dropPendingPrompts(thread.id, () => true);
+        return next.length === prev.length ? prev : next;
+      }
       const next = dropPendingPrompts(thread.id, (entry) =>
         isPendingPromptConfirmed(entry, thread.messages),
       );
       return next.length === prev.length ? prev : next;
     });
-  }, [thread.id, thread.messages]);
+  }, [thread.id, thread.messages, thread.status]);
 
   const displayMessages = useMemo<Array<Message>>(() => {
     if (pendingPrompts.length === 0) return thread.messages;
