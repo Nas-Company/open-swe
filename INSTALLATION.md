@@ -5,7 +5,7 @@ This guide walks you through setting up Open SWE end-to-end: local development, 
 
 Open SWE has two runnable pieces:
 
-- **The backend** — a LangGraph app (three graphs: `agent`, `reviewer`, `analyzer`) plus a FastAPI app (`agent.webapp:app`) that owns the webhooks and the dashboard API. Both are served together by `langgraph dev`.
+- **The backend** — a LangGraph app (four graphs: `agent`, `reviewer`, `analyzer`, `scheduler`) plus a FastAPI app (`agent.webapp:app`) that owns the webhooks and the dashboard API. Both are served together by `langgraph dev`.
 - **The dashboard** — a TanStack Start + Vite web app in `ui/` (package name `open-swe-dashboard`). It's a thin client over the FastAPI dashboard API (`/dashboard/api/*`): GitHub-login, per-user model/profile settings, team defaults, enabled-repo and review-style management, user mappings, and the Agents chat UI. It's optional for pure webhook-driven use, but recommended.
 
 > **The steps are ordered to avoid forward references.** Each step only depends on things you've already completed.
@@ -545,7 +545,7 @@ make dev          # uv run langgraph dev
 # or: uv run langgraph dev --no-browser
 ```
 
-`langgraph dev` serves **all three graphs** (`agent`, `reviewer`, `analyzer`) *and* the FastAPI app (`agent.webapp:app`) together on `http://localhost:2024`. The FastAPI app owns both the webhooks and the dashboard API:
+`langgraph dev` serves **all four graphs** (`agent`, `reviewer`, `analyzer`, `scheduler`) *and* the FastAPI app (`agent.webapp:app`) together on `http://localhost:2024`. The FastAPI app owns both the webhooks and the dashboard API:
 
 | Endpoint | Purpose |
 |---|---|
@@ -626,14 +626,15 @@ Production runs the backend and dashboard separately.
 3. Set all environment variables from step 6 in the deployment config. Set `DASHBOARD_BASE_URL` and `LANGGRAPH_URL` to your production URLs (all `https://`). Set `DASHBOARD_API_BASE_URL` to the URL browsers use for dashboard API requests and OAuth callbacks: either the backend URL for direct cross-origin calls, or the dashboard/Vercel URL when a same-origin rewrite proxies `/dashboard/api/*`.
 4. Update your webhook URLs (Linear, Slack, GitHub App) and the GitHub App / Slack OAuth callback URLs to your production URLs (replace the ngrok / localhost values). The dashboard GitHub App callback must be `<DASHBOARD_API_BASE_URL>/dashboard/api/auth/callback`.
 
-The `langgraph.json` at the project root defines the three graphs and the HTTP app:
+The `langgraph.json` at the project root defines the four graphs and the HTTP app:
 
 ```json
 {
   "graphs": {
     "agent": "agent.server:get_agent",
     "reviewer": "agent.reviewer:get_reviewer_agent",
-    "analyzer": "agent.analyzer:get_analyzer"
+    "analyzer": "agent.analyzer:get_analyzer",
+    "scheduler": "agent.scheduler:get_scheduler"
   },
   "http": {
     "app": "agent.webapp:app"
@@ -644,6 +645,10 @@ The `langgraph.json` at the project root defines the three graphs and the HTTP a
 **Dashboard** — the `ui/` app deploys to [Vercel](https://vercel.com/). The recommended production setup uses **same-origin** requests to `/dashboard/api/*` (leave `VITE_DASHBOARD_API_BASE_URL` empty), and `ui/vercel.json` rewrites those to the hosted LangGraph deployment. In this mode, set both `DASHBOARD_API_BASE_URL` and the GitHub App dashboard callback URL to the Vercel/dashboard origin (for example, `https://your-dashboard.vercel.app/dashboard/api/auth/callback`). The OAuth callback response then sets the `osw_session` cookie on the dashboard host, and later same-origin `/dashboard/api/*` requests include it. Update the rewrite `destination` in `ui/vercel.json` to your own LangGraph deployment URL.
 
 Alternatively, you can run the dashboard as a direct cross-origin client: set `VITE_DASHBOARD_API_BASE_URL` to the hosted backend origin, set `DASHBOARD_API_BASE_URL` to that same backend origin, and include the dashboard origin in `DASHBOARD_ALLOWED_ORIGINS`.
+
+Nas Company production has an additional deployment runbook with the current
+LangGraph deployment, Vercel rewrite, Modal sandbox setup, and Host API fallback:
+[`docs/nascompany-deployment.md`](docs/nascompany-deployment.md).
 
 ## Troubleshooting
 
