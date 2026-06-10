@@ -41,7 +41,6 @@ def test_thread_summary_keeps_repo_when_present() -> None:
     assert summary["repo"] == "repo"
     assert summary["repoFullName"] == "octo/repo"
 
-
 def test_thread_summary_reports_interrupted_run_status() -> None:
     summary = thread_api._thread_summary(
         {"thread_id": "t3", "metadata": {"latest_run_status": "interrupted"}}
@@ -85,6 +84,9 @@ class _ThreadListThreadsClient:
                 },
             }
         ]
+
+    async def update(self, *, thread_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+        return {"thread_id": thread_id, "metadata": metadata}
 
 
 class _ThreadListRunsClient:

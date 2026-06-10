@@ -1,6 +1,5 @@
 """Custom FastAPI routes for LangGraph server."""
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -8,7 +7,7 @@ import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs, quote
@@ -87,6 +86,7 @@ from .utils.slack import (
     GitHubPrRef,
     fetch_slack_thread_messages,
     format_slack_messages_for_prompt,
+    get_slack_channel_description,
     get_slack_user_info,
     get_slack_user_names,
     post_slack_thread_reply,
@@ -110,20 +110,10 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    from .dashboard.agent_usage import run_usage_cache_warmer, usage_cache_warmer_enabled
     from .utils.sandbox import validate_sandbox_startup_config
 
     validate_sandbox_startup_config()
-    usage_cache_task: asyncio.Task[None] | None = None
-    if usage_cache_warmer_enabled():
-        usage_cache_task = asyncio.create_task(run_usage_cache_warmer(), name="usage-cache-warmer")
-    try:
-        yield
-    finally:
-        if usage_cache_task:
-            usage_cache_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await usage_cache_task
+    yield
 
 
 app = FastAPI(lifespan=lifespan)
@@ -573,9 +563,11 @@ async def get_slack_repo_config(
 
     Priority:
         1. Repo carried over from the existing Slack thread's metadata.
-        2. The triggering user's dashboard ``default_repo`` (if they have a
+        2. A ``repo:owner/name`` token in the channel's topic/purpose.
+        3. The triggering user's dashboard ``default_repo`` (if they have a
            profile and their Slack email maps to a known GitHub login).
-        3. ``SLACK_REPO_*`` env defaults.
+        4. Team default repo.
+        5. ``SLACK_REPO_*`` env defaults.
     """
     default_owner = SLACK_REPO_OWNER.strip() or DEFAULT_REPO_OWNER
     default_name = SLACK_REPO_NAME.strip() or DEFAULT_REPO_NAME
@@ -595,6 +587,24 @@ async def get_slack_repo_config(
                 "Failed to fetch Slack thread %s for repo resolution",
                 thread_id,
             )
+
+    if not repo_config:
+        try:
+            channel_description = await get_slack_channel_description(channel_id)
+            if channel_description:
+                channel_repo_config = extract_repo_from_text(
+                    channel_description, default_owner=default_owner
+                )
+                if channel_repo_config:
+                    logger.info(
+                        "Applying repo from Slack channel %s description: %s/%s",
+                        channel_id,
+                        channel_repo_config["owner"],
+                        channel_repo_config["name"],
+                    )
+                    repo_config = channel_repo_config
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to resolve repo from Slack channel description")
 
     if not repo_config and slack_user_id:
         try:

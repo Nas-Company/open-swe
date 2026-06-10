@@ -20,6 +20,7 @@ import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AgentsIndexRouteImport } from './routes/agents/index'
 import { Route as ReviewStylesRouteImport } from './routes/review_.styles'
+import { Route as AgentsInstructionsRouteImport } from './routes/agents_.instructions'
 import { Route as AgentsThreadIdRouteImport } from './routes/agents/$threadId'
 import { Route as AgentsAutomationsIndexRouteImport } from './routes/agents/automations/index'
 import { Route as ReviewRepositoriesOwnerRouteImport } from './routes/review_.repositories.$owner'
@@ -81,6 +82,11 @@ const ReviewStylesRoute = ReviewStylesRouteImport.update({
   path: '/review/styles',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AgentsInstructionsRoute = AgentsInstructionsRouteImport.update({
+  id: '/agents_/instructions',
+  path: '/agents/instructions',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AgentsThreadIdRoute = AgentsThreadIdRouteImport.update({
   id: '/$threadId',
   path: '/$threadId',
@@ -119,6 +125,7 @@ export interface FileRoutesByFullPath {
   '/review': typeof ReviewRoute
   '/usage': typeof UsageRoute
   '/agents/$threadId': typeof AgentsThreadIdRoute
+  '/agents/instructions': typeof AgentsInstructionsRoute
   '/review/styles': typeof ReviewStylesRoute
   '/agents/': typeof AgentsIndexRoute
   '/agents/automations/$scheduleId': typeof AgentsAutomationsScheduleIdRoute
@@ -136,6 +143,7 @@ export interface FileRoutesByTo {
   '/review': typeof ReviewRoute
   '/usage': typeof UsageRoute
   '/agents/$threadId': typeof AgentsThreadIdRoute
+  '/agents/instructions': typeof AgentsInstructionsRoute
   '/review/styles': typeof ReviewStylesRoute
   '/agents': typeof AgentsIndexRoute
   '/agents/automations/$scheduleId': typeof AgentsAutomationsScheduleIdRoute
@@ -155,6 +163,7 @@ export interface FileRoutesById {
   '/review': typeof ReviewRoute
   '/usage': typeof UsageRoute
   '/agents/$threadId': typeof AgentsThreadIdRoute
+  '/agents_/instructions': typeof AgentsInstructionsRoute
   '/review_/styles': typeof ReviewStylesRoute
   '/agents/': typeof AgentsIndexRoute
   '/agents/automations/$scheduleId': typeof AgentsAutomationsScheduleIdRoute
@@ -175,6 +184,7 @@ export interface FileRouteTypes {
     | '/review'
     | '/usage'
     | '/agents/$threadId'
+    | '/agents/instructions'
     | '/review/styles'
     | '/agents/'
     | '/agents/automations/$scheduleId'
@@ -192,6 +202,7 @@ export interface FileRouteTypes {
     | '/review'
     | '/usage'
     | '/agents/$threadId'
+    | '/agents/instructions'
     | '/review/styles'
     | '/agents'
     | '/agents/automations/$scheduleId'
@@ -210,6 +221,7 @@ export interface FileRouteTypes {
     | '/review'
     | '/usage'
     | '/agents/$threadId'
+    | '/agents_/instructions'
     | '/review_/styles'
     | '/agents/'
     | '/agents/automations/$scheduleId'
@@ -228,6 +240,7 @@ export interface RootRouteChildren {
   MySettingsRoute: typeof MySettingsRoute
   ReviewRoute: typeof ReviewRoute
   UsageRoute: typeof UsageRoute
+  AgentsInstructionsRoute: typeof AgentsInstructionsRoute
   ReviewStylesRoute: typeof ReviewStylesRoute
   ReviewRepositoriesOwnerRoute: typeof ReviewRepositoriesOwnerRoute
 }
@@ -311,6 +324,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ReviewStylesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/agents_/instructions': {
+      id: '/agents_/instructions'
+      path: '/agents/instructions'
+      fullPath: '/agents/instructions'
+      preLoaderRoute: typeof AgentsInstructionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/agents/$threadId': {
       id: '/agents/$threadId'
       path: '/$threadId'
@@ -378,6 +398,7 @@ const rootRouteChildren: RootRouteChildren = {
   MySettingsRoute: MySettingsRoute,
   ReviewRoute: ReviewRoute,
   UsageRoute: UsageRoute,
+  AgentsInstructionsRoute: AgentsInstructionsRoute,
   ReviewStylesRoute: ReviewStylesRoute,
   ReviewRepositoriesOwnerRoute: ReviewRepositoriesOwnerRoute,
 }
