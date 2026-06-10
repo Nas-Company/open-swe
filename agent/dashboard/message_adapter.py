@@ -16,6 +16,7 @@ _EXECUTE_TOOLS = frozenset({"execute", "bash", "shell", "run_terminal_cmd"})
 _SEARCH_TOOLS = frozenset({"glob", "grep", "web_search", "fetch_url", "search"})
 _INTERNAL_TOOLS = frozenset({"confirming_completion", "no_op"})
 _DATA_IMAGE_RE = re.compile(r"^data:(image/[^;]+);base64,(.+)$", re.DOTALL)
+_DASHBOARD_HANDOFF_MARKER = "[Open SWE Web handoff]"
 
 
 def _now_iso() -> str:
@@ -117,6 +118,26 @@ def _image_chunks(content: Any) -> list[dict[str, Any]]:
     return chunks
 
 
+def _visible_user_content(content: Any) -> Any:
+    """Remove internal dashboard handoff instructions from user-visible messages."""
+    if isinstance(content, str):
+        return "" if content.startswith(_DASHBOARD_HANDOFF_MARKER) else content
+    if not isinstance(content, list):
+        return content
+
+    visible: list[Any] = []
+    for item in content:
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "text"
+            and isinstance(item.get("text"), str)
+            and item["text"].startswith(_DASHBOARD_HANDOFF_MARKER)
+        ):
+            continue
+        visible.append(item)
+    return visible
+
+
 def _maybe_diff_from_args(name: str, args: dict[str, Any]) -> dict[str, Any] | None:
     path = args.get("path") or args.get("file_path") or args.get("target_file")
     if not isinstance(path, str) or not path.strip():
@@ -189,7 +210,7 @@ def state_messages_to_ui(messages: list[Any]) -> list[dict[str, Any]]:
                 agent_turn["chunks"] = _merge_text_chunks(agent_turn["chunks"])
                 ui_messages.append(agent_turn)
                 agent_turn = None
-            content = raw.get("content", "")
+            content = _visible_user_content(raw.get("content", ""))
             chunks = _image_chunks(content)
             text = extract_text_content(content)
             if text:

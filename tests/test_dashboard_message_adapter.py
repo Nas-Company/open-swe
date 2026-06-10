@@ -71,6 +71,36 @@ def test_state_messages_to_ui_maps_user_images() -> None:
     ]
 
 
+def test_state_messages_to_ui_hides_dashboard_handoff_instruction() -> None:
+    messages = [
+        {
+            "type": "human",
+            "id": "u1",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "[Open SWE Web handoff] This follow-up was sent from Web. "
+                        "Do not call slack_thread_reply."
+                    ),
+                },
+                {"type": "text", "text": "hi"},
+            ],
+        }
+    ]
+
+    ui = state_messages_to_ui(messages)
+
+    assert ui == [
+        {
+            "id": "u1",
+            "author": "user",
+            "timestamp": ui[0]["timestamp"],
+            "chunks": [{"kind": "text", "text": "hi"}],
+        }
+    ]
+
+
 def test_state_messages_to_ui_tags_slack_and_linear_replies() -> None:
     messages = [
         {"type": "human", "id": "u1", "content": "ping"},
