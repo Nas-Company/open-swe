@@ -74,12 +74,24 @@ def test_make_model_uses_openai_api_key_for_default_openai(
     assert kwargs["use_responses_api"] is True
 
 
-def test_provider_model_kwargs_omits_reasoning_for_codex_proxy(
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh"])
+def test_provider_model_kwargs_sets_reasoning_effort_for_codex_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+    effort: str,
+) -> None:
+    monkeypatch.setenv("CODEX_PROXY_BASE_URL", "https://codexproxy.example.com/v1")
+
+    kwargs = model.provider_model_kwargs("openai:gpt-5.5", effort, max_tokens=16_000)
+
+    assert kwargs == {"max_tokens": 16_000, "reasoning_effort": effort}
+
+
+def test_provider_model_kwargs_omits_unsupported_reasoning_effort_for_codex_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CODEX_PROXY_BASE_URL", "https://codexproxy.example.com/v1")
 
-    kwargs = model.provider_model_kwargs("openai:gpt-5.5", "xhigh", max_tokens=16_000)
+    kwargs = model.provider_model_kwargs("openai:gpt-5.5", "none", max_tokens=16_000)
 
     assert kwargs == {"max_tokens": 16_000}
 

@@ -39,6 +39,7 @@ class AnthropicThinking(TypedDict, total=False):
 class ModelKwargs(TypedDict, total=False):
     max_tokens: int | None
     reasoning: OpenAIReasoning | None
+    reasoning_effort: OpenAIReasoningEffort | None
     thinking: AnthropicThinking | None
     effort: AnthropicEffort | None
     thinking_level: GoogleThinkingLevel | None
@@ -134,6 +135,12 @@ def openai_reasoning_for(
     return None
 
 
+def codex_proxy_reasoning_effort_for(profile_effort: str | None) -> OpenAIReasoningEffort | None:
+    if profile_effort in ("low", "medium", "high", "xhigh"):
+        return profile_effort
+    return None
+
+
 def anthropic_thinking_for(profile_effort: str | None) -> AnthropicThinking | None:
     if profile_effort in _ANTHROPIC_EFFORTS:
         # `display: "summarized"` makes Opus 4.7+ return the (summarized) reasoning
@@ -196,7 +203,11 @@ def provider_model_kwargs(
     """Build provider-specific kwargs for ``make_model`` from a model id and effort."""
     kwargs: ModelKwargs = {"max_tokens": max_tokens}
     if model_id.startswith("openai:"):
-        if not using_codex_proxy():
+        if using_codex_proxy():
+            effort = codex_proxy_reasoning_effort_for(profile_effort)
+            if effort is not None:
+                kwargs["reasoning_effort"] = effort
+        else:
             reasoning = openai_reasoning_for(profile_effort)
             if reasoning is not None:
                 kwargs["reasoning"] = reasoning
