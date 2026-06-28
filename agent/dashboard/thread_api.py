@@ -8,6 +8,7 @@ import binascii
 import json
 import logging
 import os
+import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -118,6 +119,11 @@ class ThreadMessageBody(BaseModel):
     model_id: str | None = None
     effort: str | None = None
     plan_mode: bool = False
+
+
+class ThreadCreateRunBody(ThreadMessageBody):
+    repo: str | None = None
+    repo_explicitly_none: bool = False
 
 
 class ThreadResolveBody(BaseModel):
@@ -1253,6 +1259,74 @@ async def send_dashboard_message(
     thread = await client.threads.get(thread_id)
     return _thread_summary(
         thread if isinstance(thread, dict) else {"thread_id": thread_id, "metadata": metadata}
+    )
+
+
+async def create_dashboard_thread_run(
+    login: str,
+    body: ThreadCreateRunBody,
+    *,
+    email: str | None = None,
+) -> dict[str, Any]:
+    thread_id = str(uuid.uuid4())
+    client = langgraph_client()
+    thread = await _create_dashboard_thread_record(
+        thread_id,
+        login=login,
+        repo_config=_resolve_repo_config(body.repo),
+        repo_explicitly_none=body.repo_explicitly_none,
+        prompt=body.content,
+        images=body.images,
+        model_id=body.model_id,
+        effort=body.effort,
+        plan_mode=body.plan_mode,
+    )
+    metadata = thread.get("metadata") if isinstance(thread.get("metadata"), dict) else {}
+    chosen_model, chosen_effort = _normalize_model_choice(body.model_id, body.effort)
+    overrides: dict[str, Any] = {}
+    if chosen_model and chosen_effort:
+        overrides["agent_model_id"] = chosen_model
+        overrides["agent_effort"] = chosen_effort
+    configurable = await _build_dashboard_configurable(
+        thread_id,
+        login,
+        metadata,
+        overrides=overrides,
+    )
+    content = _user_message_content(
+        body.content.strip(),
+        body.images,
+        model_id=_metadata_model_id(metadata),
+    )
+    run = await client.runs.create(
+        thread_id,
+        _ASSISTANT_ID,
+        input={"messages": [{"role": "user", "content": content}]},
+        config={"configurable": configurable},
+        stream_mode=list(_DASHBOARD_STREAM_MODES),
+        stream_resumable=True,
+        metadata=_agent_version_metadata(),
+    )
+    run_id = (
+        (run.get("run_id") or run.get("id"))
+        if isinstance(run, dict)
+        else (getattr(run, "run_id", None) or getattr(run, "id", None))
+    )
+    await client.threads.update(
+        thread_id=thread_id,
+        metadata={
+            "latest_run_id": run_id,
+            "latest_run_status": "pending",
+            "updated_at_ms": _now_ms(),
+        },
+    )
+    thread = await client.threads.get(thread_id)
+    return _thread_summary(
+        thread if isinstance(thread, dict) else {"thread_id": thread_id, "metadata": metadata},
+        latest_run_id=run_id if isinstance(run_id, str) else None,
+        latest_run_status="pending",
+        owner_login=login,
+        owner_email=email,
     )
 
 

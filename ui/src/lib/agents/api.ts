@@ -20,6 +20,11 @@ export interface ThreadMessageRequest {
   plan_mode?: boolean
 }
 
+export interface ThreadCreateRunRequest extends ThreadMessageRequest {
+  repo?: string | null
+  repo_explicitly_none?: boolean
+}
+
 export interface ScheduleCreateRequest {
   prompt: string
   schedule: string
@@ -202,6 +207,11 @@ export const agentsApi = {
     ),
   listThreadsPage: (params: ThreadsPageParams = {}) =>
     agentsRequest<ThreadsPage>(`/threads/page${buildThreadsPageQuery(params)}`),
+  createThreadRun: (body: ThreadCreateRunRequest) =>
+    agentsRequest<AgentThread>("/threads/runs", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   resolveThread: (threadId: string, resolved: boolean) =>
     agentsRequest<AgentThread>(
       `/threads/${encodeURIComponent(threadId)}/resolve`,

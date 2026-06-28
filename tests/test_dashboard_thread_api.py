@@ -619,6 +619,88 @@ async def test_proxy_runs_stream_stamps_empty_dashboard_thread(monkeypatch) -> N
     }
 
 
+async def test_create_dashboard_thread_run_creates_thread_and_run(monkeypatch) -> None:
+    created: dict[str, object] = {}
+    runs: list[dict[str, object]] = []
+    _patch_new_thread_deps(monkeypatch, profile={})
+
+    class FakeUuid:
+        def __str__(self) -> str:
+            return "tid"
+
+    monkeypatch.setattr(thread_api.uuid, "uuid4", lambda: FakeUuid())
+
+    class FakeThreads:
+        async def create(
+            self,
+            *,
+            thread_id: str,
+            metadata: dict[str, object],
+            if_exists: str,
+        ) -> None:
+            assert thread_id == "tid"
+            assert if_exists == "do_nothing"
+            created["metadata"] = dict(metadata)
+
+        async def update(self, *, thread_id: str, metadata: dict[str, object]) -> None:
+            assert thread_id == "tid"
+            existing = created.setdefault("metadata", {})
+            assert isinstance(existing, dict)
+            existing.update(metadata)
+
+        async def get(self, thread_id: str) -> dict[str, object]:
+            assert thread_id == "tid"
+            return {
+                "thread_id": thread_id,
+                "metadata": created.get("metadata", {}),
+                "status": "idle",
+            }
+
+    class FakeRuns:
+        async def create(self, thread_id: str, assistant_id: str, **kwargs: object) -> dict:
+            runs.append(
+                {
+                    "thread_id": thread_id,
+                    "assistant_id": assistant_id,
+                    **kwargs,
+                }
+            )
+            return {"run_id": "run-1", "status": "pending"}
+
+    class FakeClient:
+        threads = FakeThreads()
+        runs = FakeRuns()
+
+    monkeypatch.setattr(thread_api, "langgraph_client", lambda: FakeClient())
+
+    result = await thread_api.create_dashboard_thread_run(
+        "octocat",
+        thread_api.ThreadCreateRunBody(
+            content="Investigate production issue",
+            repo="Nas-Company/open-swe",
+            model_id=_VISION_MODEL,
+            effort="high",
+            plan_mode=True,
+        ),
+        email="octocat@example.com",
+    )
+
+    assert result["id"] == "tid"
+    assert result["status"] == "running"
+    assert created["metadata"]["latest_run_id"] == "run-1"
+    assert created["metadata"]["latest_run_status"] == "pending"
+    assert runs[0]["thread_id"] == "tid"
+    assert runs[0]["assistant_id"] == "agent"
+    configurable = runs[0]["config"]["configurable"]
+    assert configurable["github_login"] == "octocat"
+    assert configurable["user_email"] == "octocat@example.com"
+    assert configurable["source"] == "dashboard"
+    assert configurable["repo"] == {"owner": "Nas-Company", "name": "open-swe"}
+    assert configurable["agent_model_id"] == _VISION_MODEL
+    assert configurable["agent_effort"] == "high"
+    assert configurable["plan_mode"] is True
+
+
 async def test_enrich_run_start_command_attributes_non_owner_message(monkeypatch) -> None:
     class FakeThreads:
         async def update(self, *, thread_id: str, metadata: dict[str, object]) -> None:

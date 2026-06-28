@@ -173,6 +173,7 @@ export interface CreateAgentThreadVariables {
   repo_explicitly_none?: boolean
   model_id?: string | null
   effort?: string | null
+  plan_mode?: boolean
 }
 
 /**
@@ -208,6 +209,7 @@ export function optimisticThread(
     branch: "main",
     model: vars.model_id ?? "Default",
     effort: vars.effort ?? null,
+    planMode: vars.plan_mode === true,
     source: "dashboard",
     status: "running",
     viewed: true,

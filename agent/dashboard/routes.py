@@ -149,9 +149,11 @@ from .team_settings import (
     upsert_team_settings,
 )
 from .thread_api import (
+    ThreadCreateRunBody,
     ThreadMessageBody,
     ThreadResolveBody,
     cancel_dashboard_thread,
+    create_dashboard_thread_run,
     delete_dashboard_thread,
     get_dashboard_thread,
     get_dashboard_thread_pr_diff,
@@ -1488,6 +1490,14 @@ async def api_create_thread_for_stream_provider(
         content_type=request.headers.get("content-type", "application/json"),
     )
     return Response(content=content, status_code=status_code, media_type=media_type)
+
+
+@router.post("/threads/runs")
+async def api_create_thread_run(
+    body: ThreadCreateRunBody,
+    session: dict[str, Any] = _SESSION_DEP,
+) -> dict[str, Any]:
+    return await create_dashboard_thread_run(session["sub"], body, email=session.get("email"))
 
 
 @router.get("/threads/sidebar")
