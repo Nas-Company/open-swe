@@ -985,6 +985,7 @@ async def _build_dashboard_configurable(
     *,
     profile: dict[str, Any] | None = None,
     overrides: dict[str, Any] | None = None,
+    user_email: str | None = None,
 ) -> dict[str, Any]:
     profile = profile if profile is not None else await get_profile(login) or {}
     thread_source = _thread_source(metadata)
@@ -992,7 +993,7 @@ async def _build_dashboard_configurable(
         "thread_id": thread_id,
         "source": thread_source,
         "github_login": login,
-        "user_email": await _resolve_run_email(login, profile),
+        "user_email": user_email or await _resolve_run_email(login, profile),
     }
     repo_config = _repo_config_from_metadata(metadata)
     if repo_config:
@@ -1193,6 +1194,7 @@ async def _enrich_run_start_command(
         login,
         metadata,
         overrides=overrides,
+        user_email=email,
     )
 
     run_metadata = params.get("metadata")
@@ -1292,6 +1294,7 @@ async def create_dashboard_thread_run(
         login,
         metadata,
         overrides=overrides,
+        user_email=email,
     )
     content = _user_message_content(
         body.content.strip(),

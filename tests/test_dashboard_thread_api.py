@@ -623,6 +623,11 @@ async def test_create_dashboard_thread_run_creates_thread_and_run(monkeypatch) -
     created: dict[str, object] = {}
     runs: list[dict[str, object]] = []
     _patch_new_thread_deps(monkeypatch, profile={})
+    monkeypatch.setattr(
+        thread_api,
+        "_resolve_run_email",
+        lambda login, profile: "mapped@example.com",
+    )
 
     class FakeUuid:
         def __str__(self) -> str:
@@ -682,7 +687,7 @@ async def test_create_dashboard_thread_run_creates_thread_and_run(monkeypatch) -
             effort="high",
             plan_mode=True,
         ),
-        email="octocat@example.com",
+        email="session@example.com",
     )
 
     assert result["id"] == "tid"
@@ -695,7 +700,7 @@ async def test_create_dashboard_thread_run_creates_thread_and_run(monkeypatch) -
     assert "stream_resumable" not in runs[0]
     configurable = runs[0]["config"]["configurable"]
     assert configurable["github_login"] == "octocat"
-    assert configurable["user_email"] == "octocat@example.com"
+    assert configurable["user_email"] == "session@example.com"
     assert configurable["source"] == "dashboard"
     assert configurable["repo"] == {"owner": "Nas-Company", "name": "open-swe"}
     assert configurable["agent_model_id"] == _VISION_MODEL
@@ -1241,7 +1246,7 @@ async def test_enrich_run_start_command_unresolves_thread(monkeypatch) -> None:
     _patch_new_thread_deps(monkeypatch, profile={})
     monkeypatch.setattr(thread_api, "langgraph_client", lambda: FakeClient())
 
-    async def fake_build(thread_id, login, metadata, *, overrides):
+    async def fake_build(thread_id, login, metadata, *, overrides, user_email=None):
         return {"github_login": login, "source": "dashboard"}
 
     monkeypatch.setattr(thread_api, "_build_dashboard_configurable", fake_build)
