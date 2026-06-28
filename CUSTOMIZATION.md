@@ -38,11 +38,14 @@ DEFAULT_SANDBOX_SNAPSHOT_ID="<snapshot-uuid>"                      # Required
 DEFAULT_SANDBOX_SNAPSHOT_FS_CAPACITY_BYTES="34359738368"           # Optional, default 32 GiB
 DEFAULT_SANDBOX_VCPUS="4"                                          # Optional, default 4
 DEFAULT_SANDBOX_MEM_BYTES="16106127360"                            # Optional, default 15 GiB
-DEFAULT_SANDBOX_IDLE_TTL_SECONDS="600"                             # Optional, default 600 (10 min); 0 disables
+DEFAULT_SANDBOX_IDLE_TTL_SECONDS="7200"                            # Optional, default 7200 (2 h); 0 disables
 DEFAULT_SANDBOX_DELETE_AFTER_STOP_SECONDS="86400"                  # Optional, default 86400 (24 h); 0 disables
+REPO_SNAPSHOT_BASE_IMAGE="<registry>/<open-swe-sandbox-image>"      # Optional; required for admin-generated repo snapshot templates
 ```
 
 This is useful for pre-installing languages, frameworks, or internal tools that your repos depend on — reducing setup time per agent run. The default snapshot includes the GitHub CLI; agents invoke it as `GH_TOKEN=dummy gh <command>` and rely on the LangSmith proxy for the real credentials.
+
+`REPO_SNAPSHOT_BASE_IMAGE` should point to the published Docker image used to create your default Open SWE sandbox snapshot (typically the image built from this repository's `Dockerfile`). The admin **Repository Snapshots** page uses it as the base image when generating per-repo Dockerfile templates. If it is not configured, template generation fails closed instead of suggesting a bare image that would be missing Open SWE's required sandbox tools.
 
 For LangSmith sandboxes, Open SWE configures two GitHub proxy rules whenever a sandbox is created or reattached to a run:
 
@@ -463,7 +466,7 @@ Middleware hooks run around the agent loop. Open SWE includes:
 |---|---|---|
 | `ToolErrorMiddleware` | Tool error handler | Catches and formats tool errors |
 | `check_message_queue_before_model` | Before model | Injects follow-up messages that arrived mid-run |
-| `ensure_no_empty_msg` | Before model | Prevents empty messages from reaching the model |
+| `ensure_no_empty_msg` | After model | Re-injects a tool call when the model stops without one, so runs don't end prematurely |
 | `notify_step_limit_reached` | After agent | Posts a Slack reply when the agent hits the model-call limit |
 
 There is intentionally no after-agent middleware that opens a PR for the agent. The agent is responsible for committing, pushing, opening/updating the draft PR, and replying in the source channel. If you want a deterministic backstop for your fork, add an `@after_agent` hook here.

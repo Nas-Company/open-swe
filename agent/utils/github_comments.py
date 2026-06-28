@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from .github_token import GitHubAuthError
+from .http import DEFAULT_HTTP_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,8 @@ _REACTION_ENDPOINTS: dict[str, str] = {
     "pull_request_review": "https://api.github.com/repos/{owner}/{repo}/pulls/{pull_number}/reviews/{comment_id}/reactions",
 }
 
+PAGINATED_MAX_PAGES = 50
+
 
 def verify_github_signature(body: bytes, signature: str, *, secret: str) -> bool:
     """Verify the GitHub webhook signature (X-Hub-Signature-256).
@@ -62,6 +65,17 @@ def verify_github_signature(body: bytes, signature: str, *, secret: str) -> bool
 
     expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature)
+
+
+def derive_pr_state(*, state: str | None, merged: bool, draft: bool) -> str:
+    """Map GitHub PR fields to the dashboard's pr_state vocabulary."""
+    if merged:
+        return "merged"
+    if state == "closed":
+        return "closed"
+    if draft:
+        return "draft"
+    return "open"
 
 
 def get_thread_id_from_branch(branch_name: str) -> str | None:
@@ -122,7 +136,7 @@ async def react_to_github_comment(
         owner=owner, repo=repo, comment_id=comment_id, pull_number=pull_number
     )
 
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as http_client:
         try:
             response = await http_client.post(
                 url,
@@ -157,7 +171,7 @@ async def _react_via_graphql(node_id: str | None, *, token: str) -> bool:
     }
     }
     """
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as http_client:
         try:
             response = await http_client.post(
                 "https://api.github.com/graphql",
@@ -191,7 +205,7 @@ async def post_github_comment(
     owner = repo_config.get("owner", "")
     repo = repo_config.get("name", "")
     url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments"
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as client:
         try:
             response = await client.post(
                 url,
@@ -221,7 +235,7 @@ async def fetch_issue_comments(
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as http_client:
         comments = await _fetch_paginated(
             http_client,
             f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments",
@@ -270,7 +284,7 @@ async def fetch_pr_comments_since_last_tag(
 
     all_comments: list[dict[str, Any]] = []
 
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as http_client:
         pr_comments, review_comments, reviews = await asyncio.gather(
             _fetch_paginated(
                 http_client,
@@ -371,7 +385,7 @@ async def fetch_pr_branch(
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        async with httpx.AsyncClient() as http_client:
+        async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as http_client:
             response = await http_client.get(
                 f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
                 headers=headers,
@@ -453,6 +467,9 @@ async def _fetch_paginated(
 ) -> list[dict[str, Any]]:
     """Fetch all pages from a GitHub paginated endpoint.
 
+    Caps at ``PAGINATED_MAX_PAGES`` pages to avoid unbounded fetching on
+    pathological PRs with thousands of comments.
+
     Args:
         client: An active httpx async client.
         url: The GitHub API endpoint URL.
@@ -464,7 +481,7 @@ async def _fetch_paginated(
     results: list[dict[str, Any]] = []
     params: dict[str, Any] = {"per_page": 100, "page": 1}
 
-    while True:
+    while params["page"] <= PAGINATED_MAX_PAGES:
         try:
             response = await client.get(url, headers=headers, params=params)
             if response.status_code == 401:

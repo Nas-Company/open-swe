@@ -184,9 +184,9 @@ class TestCreateSandboxWithProxy:
         """Installation token should be used for proxy auth on langsmith sandboxes."""
         with (
             patch(
-                "agent.server.get_github_app_installation_token",
+                "agent.server.get_github_app_installation_token_with_expiry",
                 new_callable=AsyncMock,
-                return_value="ghs_install",
+                return_value=("ghs_install", None),
             ),
             patch("agent.server.create_sandbox") as mock_create,
             patch("agent.server._configure_github_proxy") as mock_proxy,
@@ -198,7 +198,7 @@ class TestCreateSandboxWithProxy:
 
             await _create_sandbox_with_proxy()
 
-            mock_create.assert_called_once_with()
+            mock_create.assert_called_once_with(snapshot_id=None)
             mock_proxy.assert_called_once_with("sandbox-123", "ghs_install")
 
     @pytest.mark.asyncio
@@ -215,7 +215,7 @@ class TestCreateSandboxWithProxy:
 
             await _create_sandbox_with_proxy()
 
-            mock_create.assert_called_once_with()
+            mock_create.assert_called_once_with(snapshot_id=None)
             mock_proxy.assert_not_called()
 
     @pytest.mark.asyncio
@@ -224,9 +224,9 @@ class TestCreateSandboxWithProxy:
         with (
             patch("agent.server.create_sandbox") as mock_create,
             patch(
-                "agent.server.get_github_app_installation_token",
+                "agent.server.get_github_app_installation_token_with_expiry",
                 new_callable=AsyncMock,
-                return_value=None,
+                return_value=(None, None),
             ),
             patch.dict("os.environ", {"SANDBOX_TYPE": "langsmith"}),
         ):
@@ -274,6 +274,8 @@ class TestSandboxHealthCheck:
         mock_recreate.assert_awaited_once_with(
             "thread-123",
             github_proxy_token="ghs_proxy",
+            github_proxy_repositories=None,
+            repo=None,
         )
 
     @pytest.mark.asyncio
@@ -324,9 +326,9 @@ class TestRefreshProxyOnSandboxReuse:
                 return_value="sandbox-cached",
             ),
             patch(
-                "agent.server.get_github_app_installation_token",
+                "agent.server.get_github_app_installation_token_with_expiry",
                 new_callable=AsyncMock,
-                return_value="ghs_fresh",
+                return_value=("ghs_fresh", None),
             ),
             patch("agent.server._configure_github_proxy") as mock_proxy,
             patch(
@@ -374,9 +376,9 @@ class TestRefreshProxyOnSandboxReuse:
             ),
             patch("agent.server.create_sandbox", return_value=mock_sandbox) as mock_create,
             patch(
-                "agent.server.get_github_app_installation_token",
+                "agent.server.get_github_app_installation_token_with_expiry",
                 new_callable=AsyncMock,
-                return_value="ghs_fresh",
+                return_value=("ghs_fresh", None),
             ),
             patch("agent.server._configure_github_proxy") as mock_proxy,
             patch(
@@ -409,9 +411,9 @@ class TestRefreshProxyOnSandboxReuse:
 
         with (
             patch(
-                "agent.server.get_github_app_installation_token",
+                "agent.server.get_github_app_installation_token_with_expiry",
                 new_callable=AsyncMock,
-                return_value="ghs_fresh",
+                return_value=("ghs_fresh", None),
             ),
             patch(
                 "agent.server._configure_github_proxy",
@@ -434,7 +436,12 @@ class TestRefreshProxyOnSandboxReuse:
 
             assert sandbox is replacement_sandbox
             mock_proxy.assert_called_once_with("sandbox-stale", "ghs_fresh")
-            mock_recreate.assert_awaited_once_with("thread-123", github_proxy_token=None)
+            mock_recreate.assert_awaited_once_with(
+                "thread-123",
+                github_proxy_token=None,
+                github_proxy_repositories=None,
+                repo=None,
+            )
 
     @pytest.mark.asyncio
     async def test_starts_stopped_langsmith_sandbox_before_proxy_refresh(self) -> None:
@@ -445,9 +452,9 @@ class TestRefreshProxyOnSandboxReuse:
 
         with (
             patch(
-                "agent.server.get_github_app_installation_token",
+                "agent.server.get_github_app_installation_token_with_expiry",
                 new_callable=AsyncMock,
-                return_value="ghs_fresh",
+                return_value=("ghs_fresh", None),
             ),
             patch("agent.server._configure_github_proxy") as mock_proxy,
             patch.dict("os.environ", {"SANDBOX_TYPE": "langsmith"}),
@@ -472,9 +479,9 @@ class TestRefreshProxyOnSandboxReuse:
 
         with (
             patch(
-                "agent.server.get_github_app_installation_token",
+                "agent.server.get_github_app_installation_token_with_expiry",
                 new_callable=AsyncMock,
-                return_value="ghs_fresh",
+                return_value=("ghs_fresh", None),
             ),
             patch("agent.server._configure_github_proxy") as mock_proxy,
             patch.dict("os.environ", {"SANDBOX_TYPE": "langsmith"}),

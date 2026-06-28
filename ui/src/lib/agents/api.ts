@@ -2,13 +2,14 @@ import type { AgentSchedule, AgentThread, ImageChunk, Message } from "./types"
 
 export type { AgentSchedule, AgentThread, Message }
 
-export interface ThreadCreateRequest {
-  prompt: string
-  images?: Array<ImageChunk>
-  repo?: string | null
-  repo_explicitly_none?: boolean
-  model_id?: string | null
-  effort?: string | null
+export class AgentsApiError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string
+  ) {
+    super(message)
+    this.name = "AgentsApiError"
+  }
 }
 
 export interface ThreadMessageRequest {
@@ -16,6 +17,7 @@ export interface ThreadMessageRequest {
   images?: Array<ImageChunk>
   model_id?: string | null
   effort?: string | null
+  plan_mode?: boolean
 }
 
 export interface ScheduleCreateRequest {
@@ -37,10 +39,65 @@ export interface ScheduleUpdateRequest {
   enabled?: boolean | null
 }
 
+export interface ThreadPrDiffFile {
+  path: string
+  previousPath: string | null
+  status: "added" | "removed" | "modified" | "renamed" | string
+  additions: number
+  deletions: number
+  originalContent: string | null
+  modifiedContent: string | null
+  unrenderable: boolean
+}
+
+export interface ThreadPrDiff {
+  prNumber: number
+  baseSha: string
+  headSha: string
+  truncated: boolean
+  files: Array<ThreadPrDiffFile>
+}
+
+export interface ThreadRecoveryPatch {
+  blob: Blob
+  filename: string
+}
+
+export interface ThreadsPageParams {
+  limit?: number
+  offset?: number
+  resolved?: boolean
+  viewed?: boolean
+  source?: string
+  status?: string
+  q?: string
+}
+
+export interface ThreadsPage {
+  items: Array<AgentThread>
+  total?: number
+  limit: number
+  offset: number
+  hasMore?: boolean
+}
+
+export interface SidebarThreadsGroup {
+  items: Array<AgentThread>
+  limit: number
+  hasMore: boolean
+}
+
+export interface SidebarThreads {
+  active: SidebarThreadsGroup
+  resolved: SidebarThreadsGroup
+}
+
 const API_BASE = (import.meta.env.VITE_DASHBOARD_API_BASE_URL ?? "").replace(
   /\/$/,
   ""
 )
+
+export const agentsLangGraphApiUrl = `${API_BASE}/dashboard/api`
 
 async function agentsRequest<T>(
   path: string,
@@ -67,14 +124,92 @@ async function agentsRequest<T>(
     } catch {
       /* ignore */
     }
-    throw new Error(message)
+    throw new AgentsApiError(res.status, message)
   }
   if (res.status === 204) return undefined as T
   return (await res.json()) as T
 }
 
+function filenameFromContentDisposition(value: string | null): string | null {
+  const match = /filename="([^"]+)"/.exec(value ?? "")
+  return match?.[1] ?? null
+}
+
+async function agentsBlobRequest(path: string): Promise<ThreadRecoveryPatch> {
+  const res = await fetch(`${API_BASE}/dashboard/api${path}`, {
+    credentials: "include",
+    headers: { Accept: "text/x-diff" },
+  })
+  if (!res.ok) {
+    let message = res.statusText
+    try {
+      const body = await res.json()
+      if (body?.detail) {
+        message =
+          typeof body.detail === "string"
+            ? body.detail
+            : JSON.stringify(body.detail)
+      }
+    } catch {
+      /* ignore */
+    }
+    throw new AgentsApiError(res.status, message)
+  }
+  return {
+    blob: await res.blob(),
+    filename:
+      filenameFromContentDisposition(res.headers.get("content-disposition")) ??
+      "open-swe-recovery.patch",
+  }
+}
+
+function buildThreadsPageQuery(params: ThreadsPageParams): string {
+  const search = new URLSearchParams()
+  if (params.limit != null) search.set("limit", String(params.limit))
+  if (params.offset != null) search.set("offset", String(params.offset))
+  if (params.resolved != null) search.set("resolved", String(params.resolved))
+  if (params.viewed != null) search.set("viewed", String(params.viewed))
+  if (params.source) search.set("source", params.source)
+  if (params.status) search.set("status", params.status)
+  if (params.q) search.set("q", params.q)
+  const query = search.toString()
+  return query ? `?${query}` : ""
+}
+
+function buildSidebarThreadsQuery(params: {
+  activeLimit?: number
+  resolvedLimit?: number
+}): string {
+  const search = new URLSearchParams()
+  if (params.activeLimit != null) {
+    search.set("active_limit", String(params.activeLimit))
+  }
+  if (params.resolvedLimit != null) {
+    search.set("resolved_limit", String(params.resolvedLimit))
+  }
+  const query = search.toString()
+  return query ? `?${query}` : ""
+}
+
 export const agentsApi = {
-  listThreads: () => agentsRequest<Array<AgentThread>>("/threads"),
+  langGraphApiUrl: agentsLangGraphApiUrl,
+  listSidebarThreads: (params: {
+    activeLimit?: number
+    resolvedLimit?: number
+  }) =>
+    agentsRequest<SidebarThreads>(
+      `/threads/sidebar${buildSidebarThreadsQuery(params)}`
+    ),
+  listThreadsPage: (params: ThreadsPageParams = {}) =>
+    agentsRequest<ThreadsPage>(`/threads/page${buildThreadsPageQuery(params)}`),
+  resolveThread: (threadId: string, resolved: boolean) =>
+    agentsRequest<AgentThread>(
+      `/threads/${encodeURIComponent(threadId)}/resolve`,
+      {
+        method: "POST",
+        body: JSON.stringify({ resolved }),
+      }
+    ),
   listSchedules: () => agentsRequest<Array<AgentSchedule>>("/schedules"),
   createSchedule: (body: ScheduleCreateRequest) =>
     agentsRequest<AgentSchedule>("/schedules", {
@@ -99,12 +234,7 @@ export const agentsApi = {
         options?.markViewed === false ? "?mark_viewed=false" : ""
       }`
     ),
-  createThread: (body: ThreadCreateRequest) =>
-    agentsRequest<AgentThread>("/threads", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-  sendMessage: (threadId: string, body: ThreadMessageRequest) =>
+  queueMessage: (threadId: string, body: ThreadMessageRequest) =>
     agentsRequest<AgentThread>(
       `/threads/${encodeURIComponent(threadId)}/messages`,
       {
@@ -123,20 +253,16 @@ export const agentsApi = {
     agentsRequest<void>(`/threads/${encodeURIComponent(threadId)}`, {
       method: "DELETE",
     }),
+  getThreadPrDiff: (threadId: string) =>
+    agentsRequest<ThreadPrDiff>(
+      `/threads/${encodeURIComponent(threadId)}/pr-diff`
+    ),
+  downloadThreadRecoveryPatch: (threadId: string) =>
+    agentsBlobRequest(
+      `/threads/${encodeURIComponent(threadId)}/recovery.patch`
+    ),
   streamUrl: (threadId: string) =>
     `${API_BASE}/dashboard/api/threads/${encodeURIComponent(threadId)}/stream`,
-}
-
-export function formatRelativeTime(ts: number): string {
-  const diff = Date.now() - ts
-  const mins = Math.floor(diff / 60000)
-  if (mins < 60) return `${mins}m`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h`
-  const days = Math.floor(hours / 24)
-  if (days < 7) return `${days}d`
-  const weeks = Math.floor(days / 7)
-  return `${weeks}w`
 }
 
 export type ThreadGroup = "today" | "last7" | "last30" | "older"

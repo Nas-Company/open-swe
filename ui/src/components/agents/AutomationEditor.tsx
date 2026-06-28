@@ -9,12 +9,13 @@ import {
 
 import type { ModelOption } from "@/lib/api"
 import type { AgentSchedule } from "@/lib/agents/types"
-import type { ModelSelection } from "@/lib/agents/useModelOptions"
+import type { AutomationTemplate } from "@/lib/agents/automation-templates"
+import type { ModelSelection } from "@/lib/agents/provider/useModelOptions"
 import { RepoSelector } from "@/components/agents/RepoSelector"
 import { ScheduleTriggerPicker } from "@/components/agents/ScheduleTriggerPicker"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
-import { describeCron, presetForCron } from "@/lib/agents/cron"
+import { describeCron, isDescribableCron } from "@/lib/agents/cron"
 import {
   useCreateAgentSchedule,
   useDeleteAgentSchedule,
@@ -23,13 +24,15 @@ import {
 import {
   formatModelSelection,
   useModelOptions,
-} from "@/lib/agents/useModelOptions"
+} from "@/lib/agents/provider/useModelOptions"
 import { useRepos } from "@/lib/profile"
 import { cn } from "@/lib/utils"
 
 interface AutomationEditorProps {
   mode: "create" | "edit"
   schedule?: AgentSchedule
+  /** Seeds the form in create mode when the user starts from a template. */
+  template?: AutomationTemplate
 }
 
 function scheduleToSelection(
@@ -46,7 +49,11 @@ function scheduleToSelection(
     : null
 }
 
-export function AutomationEditor({ mode, schedule }: AutomationEditorProps) {
+export function AutomationEditor({
+  mode,
+  schedule,
+  template,
+}: AutomationEditorProps) {
   const navigate = useNavigate()
   const reposQuery = useRepos()
   const { models, defaultSelection } = useModelOptions()
@@ -55,11 +62,14 @@ export function AutomationEditor({ mode, schedule }: AutomationEditorProps) {
   const updateSchedule = useUpdateAgentSchedule()
   const deleteSchedule = useDeleteAgentSchedule()
 
-  const [name, setName] = useState(schedule?.name ?? "")
-  const [prompt, setPrompt] = useState(schedule?.prompt ?? "")
-  const [cron, setCron] = useState<string | null>(schedule?.schedule ?? null)
+  const initialCron = schedule?.schedule ?? template?.schedule ?? null
+  const [name, setName] = useState(schedule?.name ?? template?.name ?? "")
+  const [prompt, setPrompt] = useState(
+    schedule?.prompt ?? template?.prompt ?? ""
+  )
+  const [cron, setCron] = useState<string | null>(initialCron)
   const [customMode, setCustomMode] = useState(
-    schedule ? presetForCron(schedule.schedule) === "custom" : false
+    initialCron ? !isDescribableCron(initialCron) : false
   )
   const [repo, setRepo] = useState<string | null>(schedule?.repo ?? null)
   const [enabled, setEnabled] = useState(schedule?.enabled ?? true)
@@ -139,7 +149,7 @@ export function AutomationEditor({ mode, schedule }: AutomationEditorProps) {
   return (
     <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
       <header className="flex items-center justify-between gap-3 px-6 py-4 max-md:pt-14">
-        <div className="flex min-w-0 items-center gap-1.5 text-sm text-[var(--ui-text-dim)]">
+        <div className="flex min-w-0 items-center gap-1.5 text-xs text-[var(--ui-text-dim)]">
           <Link
             to="/agents/automations"
             className="shrink-0 transition-colors hover:text-[var(--ui-text)]"
@@ -179,10 +189,10 @@ export function AutomationEditor({ mode, schedule }: AutomationEditorProps) {
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="Untitled automation"
-          className="w-full bg-transparent text-2xl font-semibold text-[var(--ui-text)] outline-none placeholder:text-[var(--ui-text-dim)]"
+          className="w-full bg-transparent text-base font-medium text-[var(--ui-text)] outline-none placeholder:text-[var(--ui-text-dim)]"
         />
 
-        <div className="mt-3 flex items-center gap-3 text-sm">
+        <div className="mt-3 flex items-center gap-3 text-xs">
           <div className="flex items-center gap-2">
             <Switch checked={enabled} onCheckedChange={setEnabled} />
             <span className="text-[var(--ui-text-muted)]">
@@ -255,7 +265,7 @@ export function AutomationEditor({ mode, schedule }: AutomationEditorProps) {
         </div>
 
         {errorMessage && (
-          <p className="mt-4 text-sm text-[var(--ui-danger)]">{errorMessage}</p>
+          <p className="mt-4 text-xs text-[var(--ui-danger)]">{errorMessage}</p>
         )}
       </div>
     </div>
@@ -264,7 +274,7 @@ export function AutomationEditor({ mode, schedule }: AutomationEditorProps) {
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <h2 className="mt-8 mb-2 text-sm font-medium text-[var(--ui-text-muted)]">
+    <h2 className="mt-8 mb-2 text-xs font-medium text-[var(--ui-text-muted)]">
       {children}
     </h2>
   )
@@ -310,7 +320,7 @@ function ModelPicker({
         type="button"
         disabled={disabled}
         onClick={() => setOpen((value) => !value)}
-        className="flex items-center gap-1 text-sm text-[var(--ui-text-muted)] transition-opacity hover:opacity-80 disabled:opacity-60"
+        className="flex items-center gap-1 text-xs text-[var(--ui-text-muted)] transition-opacity hover:opacity-80 disabled:opacity-60"
       >
         <span>{formatModelSelection(models, selection)}</span>
         {!disabled && <CaretDownIcon className="size-3.5 opacity-60" />}
@@ -331,7 +341,7 @@ function ModelPicker({
                   setOpen(false)
                 }}
                 className={cn(
-                  "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm whitespace-nowrap transition-colors hover:bg-[var(--ui-panel-2)]",
+                  "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs whitespace-nowrap transition-colors hover:bg-[var(--ui-panel-2)]",
                   selected
                     ? "text-[var(--ui-text)]"
                     : "text-[var(--ui-text-muted)]"

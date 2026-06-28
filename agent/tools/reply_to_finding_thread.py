@@ -1,22 +1,23 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from langgraph.config import get_config
 
 from ..reviewer_findings import (
     FindingInteraction,
+    ReviewerThreadMissingError,
     append_finding_interaction,
     get_finding,
     get_thread_id_from_runtime,
+    thread_missing_tool_result,
     update_finding_fields,
 )
 from ..reviewer_publish import reply_to_review_comment
 from ..utils.github_token import get_github_token
 
 
-def reply_to_finding_thread(finding_id: str, body: str) -> dict[str, Any]:
+async def reply_to_finding_thread(finding_id: str, body: str) -> dict[str, Any]:
     """Reply to the GitHub review thread for a tracked finding."""
     if not body.strip():
         return {"success": False, "error": "Reply body is required"}
@@ -37,8 +38,8 @@ def reply_to_finding_thread(finding_id: str, body: str) -> dict[str, Any]:
     if not token:
         return {"success": False, "error": "No GitHub token available"}
 
-    return asyncio.run(
-        _reply_to_finding_thread_async(
+    try:
+        return await _reply_to_finding_thread_async(
             finding_id=finding_id,
             body=body,
             owner=str(repo_config["owner"]),
@@ -46,7 +47,8 @@ def reply_to_finding_thread(finding_id: str, body: str) -> dict[str, Any]:
             pr_number=pr_number,
             token=token,
         )
-    )
+    except ReviewerThreadMissingError as exc:
+        return thread_missing_tool_result(exc)
 
 
 async def _reply_to_finding_thread_async(

@@ -1,0 +1,384 @@
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+
+def test_dashboard_plan_url_uses_plan_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DASHBOARD_BASE_URL", "https://example.test")
+    from agent.utils.dashboard_links import dashboard_plan_url
+
+    assert dashboard_plan_url("abc-123") == "https://example.test/agents/abc-123/plan"
+
+
+def test_dashboard_plan_url_none_without_thread() -> None:
+    from agent.utils.dashboard_links import dashboard_plan_url
+
+    assert dashboard_plan_url("") is None
+
+
+def test_format_comments_numbers_and_skips_blank() -> None:
+    from agent.dashboard.plan_api import _format_comments
+
+    text = _format_comments(
+        [
+            {"author": "alice", "body": "add a docstring"},
+            {"author": "bob", "body": "looks good"},
+            {"author": "carol", "body": "   "},  # blank → skipped
+        ]
+    )
+    assert "1. alice: add a docstring" in text
+    assert "2. bob: looks good" in text
+    assert "carol" not in text
+
+
+def test_format_comments_empty() -> None:
+    from agent.dashboard.plan_api import _format_comments
+
+    assert _format_comments([]) == ""
+
+
+def test_plan_comment_helpers_exported() -> None:
+    from agent.dashboard import plan_store
+
+    assert plan_store.PLAN_COMMENTS_NAMESPACE == ["plan", "comments"]
+    assert callable(plan_store.add_plan_comment)
+    assert callable(plan_store.list_plan_comments)
+    assert callable(plan_store.delete_plan_comment)
+    assert callable(plan_store.clear_plan_comments)
+
+
+def _fake_client(store: Any) -> Any:
+    return type("C", (), {"store": store})()
+
+
+async def test_list_plan_comments_swallows_errors_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent.dashboard import plan_store
+
+    class _Store:
+        async def search_items(self, *a: Any, **k: Any) -> Any:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(plan_store, "_client", lambda: _fake_client(_Store()))
+    assert await plan_store.list_plan_comments("t") == []
+
+
+async def test_list_plan_comments_raises_with_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent.dashboard import plan_store
+
+    class _Store:
+        async def search_items(self, *a: Any, **k: Any) -> Any:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(plan_store, "_client", lambda: _fake_client(_Store()))
+    with pytest.raises(RuntimeError):
+        await plan_store.list_plan_comments("t", raise_on_error=True)
+
+
+async def test_clear_plan_comments_deletes_each(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent.dashboard import plan_store
+
+    deleted: list[str] = []
+
+    class _Store:
+        async def search_items(self, *a: Any, **k: Any) -> Any:
+            return {"items": [{"value": {"id": "a"}}, {"value": {"id": "b"}}]}
+
+        async def delete_item(self, _ns: Any, key: str) -> None:
+            deleted.append(key)
+
+    monkeypatch.setattr(plan_store, "_client", lambda: _fake_client(_Store()))
+    await plan_store.clear_plan_comments("t")
+    assert deleted == ["a", "b"]
+
+
+async def test_save_plan_requires_run_context() -> None:
+    from agent.tools.save_plan import save_plan
+
+    # No LangGraph run context → no thread_id → graceful error, not a crash.
+    result = await save_plan("## Plan")
+    assert result["success"] is False
+    assert "thread_id" in result["error"]
+
+
+async def test_save_plan_rejects_empty_markdown() -> None:
+    from agent.tools.save_plan import save_plan
+
+    result = await save_plan("   ")
+    assert result["success"] is False
+    assert "empty" in result["error"]
+
+
+def test_plan_routes_registered() -> None:
+    from agent.webapp import app
+
+    paths = {getattr(route, "path", "") for route in app.routes}
+    assert "/dashboard/api/plan/{thread_id}" in paths
+    assert "/dashboard/api/plan/{thread_id}/approve" in paths
+    assert "/dashboard/api/plan/{thread_id}/reject" in paths
+    assert "/dashboard/api/plan/{thread_id}/comments" in paths
+    assert "/dashboard/api/plan/{thread_id}/comments/{comment_id}" in paths
+    assert "/dashboard/api/plan/yjs/{thread_id}" not in paths
+    assert "/dashboard/api/workflow-approval/{thread_id}/{fingerprint}/approve" in paths
+    assert "/dashboard/api/workflow-approval/{thread_id}/{fingerprint}/reject" in paths
+
+
+def test_save_plan_exported_and_wired() -> None:
+    from agent.tools import save_plan
+
+    assert callable(save_plan)
+
+
+def test_plan_status_constants() -> None:
+    from agent.dashboard import plan_store
+
+    assert plan_store.PLAN_STATUS_READY == "ready"
+    assert plan_store.PLAN_STATUS_PLANNING == "planning"
+    assert plan_store.PLAN_STATUS_APPROVED == "approved"
+    assert plan_store.PLAN_STATUS_REVISING == "revising"
+
+
+def test_http_request_excluded_in_plan_mode() -> None:
+    from agent.server import PLAN_MODE_EXCLUDED_TOOLS
+
+    assert "http_request" in PLAN_MODE_EXCLUDED_TOOLS
+
+
+class _FakeReq:
+    def __init__(self, tools: list[Any], state: dict[str, Any]) -> None:
+        self.tools = tools
+        self.state = state
+
+    def override(self, **kw: Any) -> _FakeReq:
+        return _FakeReq(kw.get("tools", self.tools), self.state)
+
+
+def _names(req: _FakeReq) -> set[str]:
+    return {t["name"] for t in req.tools}
+
+
+def test_plan_mode_middleware_initial_always_filters() -> None:
+    from agent.middleware import PlanModeMiddleware
+
+    mw = PlanModeMiddleware(excluded=frozenset({"write_file"}), initial=True)
+    req = _FakeReq([{"name": "read_file"}, {"name": "write_file"}], {})
+    assert _names(mw._filter(req)) == {"read_file"}
+
+
+def test_plan_mode_middleware_self_activation_via_state() -> None:
+    from agent.middleware import PlanModeMiddleware
+
+    mw = PlanModeMiddleware(excluded=frozenset({"write_file"}), initial=False)
+    # Plan mode not yet active: nothing filtered.
+    off = _FakeReq([{"name": "read_file"}, {"name": "write_file"}], {})
+    assert _names(mw._filter(off)) == {"read_file", "write_file"}
+    # After enter_plan_mode sets state: the next request is filtered.
+    on = _FakeReq([{"name": "read_file"}, {"name": "write_file"}], {"plan_mode": True})
+    assert _names(mw._filter(on)) == {"read_file"}
+
+
+# --- manual plan editing -------------------------------------------------
+
+
+async def test_save_plan_content_clear_comments_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent.dashboard import plan_store
+
+    cleared: list[str] = []
+
+    class _Store:
+        async def put_item(self, *a: Any, **k: Any) -> None:
+            return None
+
+    async def fake_clear(thread_id: str) -> None:
+        cleared.append(thread_id)
+
+    async def fake_merge(thread_id: str, metadata: dict[str, Any]) -> None:
+        return None
+
+    monkeypatch.setattr(plan_store, "_client", lambda: _fake_client(_Store()))
+    monkeypatch.setattr(plan_store, "clear_plan_comments", fake_clear)
+    monkeypatch.setattr(plan_store, "_merge_thread_metadata", fake_merge)
+
+    # A manual edit keeps reviewer comments; the agent's republish clears them.
+    await plan_store.save_plan_content("t", markdown="x", clear_comments=False)
+    assert cleared == []
+    await plan_store.save_plan_content("t", markdown="x")
+    assert cleared == ["t"]
+
+
+def _patch_update_plan_deps(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    metadata: dict[str, Any],
+    owner: bool,
+    content: dict[str, Any],
+    saved: dict[str, Any],
+    sandbox: dict[str, Any],
+) -> None:
+    from agent.dashboard import plan_api
+
+    async def fake_meta(thread_id: str) -> dict[str, Any]:
+        return metadata
+
+    async def fake_get_content(thread_id: str) -> dict[str, Any]:
+        return content
+
+    async def fake_save(
+        thread_id: str, *, markdown: str, status: str, clear_comments: bool = True
+    ) -> None:
+        saved.update(markdown=markdown, status=status, clear_comments=clear_comments)
+
+    async def fake_write(thread_id: str, c: str) -> str:
+        sandbox["content"] = c
+        return "plan.md"
+
+    monkeypatch.setattr(plan_api, "_thread_metadata", fake_meta)
+    monkeypatch.setattr(plan_api, "_user_owns_thread", lambda *a, **k: owner)
+    monkeypatch.setattr(plan_api, "get_plan_content", fake_get_content)
+    monkeypatch.setattr(plan_api, "save_plan_content", fake_save)
+    monkeypatch.setattr(plan_api, "write_plan_to_sandbox", fake_write)
+
+
+async def test_update_plan_owner_saves_and_mirrors_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent.dashboard import plan_api
+
+    saved: dict[str, Any] = {}
+    sandbox: dict[str, Any] = {}
+    _patch_update_plan_deps(
+        monkeypatch,
+        metadata={"plan_status": "ready"},
+        owner=True,
+        content={"markdown": "old", "status": "ready"},
+        saved=saved,
+        sandbox=sandbox,
+    )
+
+    result = await plan_api.update_plan(
+        "t1", plan_api.PlanUpdate(markdown="# New\n\ndo x"), session={"sub": "a", "email": None}
+    )
+    assert result == {"status": "ready", "markdown": "# New\n\ndo x"}
+    assert saved["status"] == "ready"
+    assert saved["clear_comments"] is False
+    assert sandbox["content"] == "# New\n\ndo x"
+
+
+async def test_update_plan_rejects_non_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import HTTPException
+
+    from agent.dashboard import plan_api
+
+    _patch_update_plan_deps(monkeypatch, metadata={}, owner=False, content={}, saved={}, sandbox={})
+    with pytest.raises(HTTPException) as exc:
+        await plan_api.update_plan(
+            "t1", plan_api.PlanUpdate(markdown="x"), session={"sub": "b", "email": None}
+        )
+    assert exc.value.status_code == 403
+
+
+async def test_update_plan_rejects_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import HTTPException
+
+    from agent.dashboard import plan_api
+
+    _patch_update_plan_deps(monkeypatch, metadata={}, owner=True, content={}, saved={}, sandbox={})
+    with pytest.raises(HTTPException) as exc:
+        await plan_api.update_plan(
+            "t1", plan_api.PlanUpdate(markdown="   "), session={"sub": "a", "email": None}
+        )
+    assert exc.value.status_code == 422
+
+
+async def test_update_plan_blocked_once_approved(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import HTTPException
+
+    from agent.dashboard import plan_api
+
+    _patch_update_plan_deps(
+        monkeypatch,
+        metadata={"plan_status": "approved"},
+        owner=True,
+        content={"markdown": "old", "status": "approved"},
+        saved={},
+        sandbox={},
+    )
+    with pytest.raises(HTTPException) as exc:
+        await plan_api.update_plan(
+            "t1", plan_api.PlanUpdate(markdown="x"), session={"sub": "a", "email": None}
+        )
+    assert exc.value.status_code == 409
+
+
+async def test_approve_plan_dispatches_published_markdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent.dashboard import plan_api
+
+    dispatched: dict[str, Any] = {}
+
+    async def fake_meta(thread_id: str) -> dict[str, Any]:
+        return {"plan_status": "ready"}
+
+    async def fake_get_content(thread_id: str, *, raise_on_error: bool = False) -> dict[str, Any]:
+        return {"markdown": "# Edited plan\n\nstep one", "status": "ready"}
+
+    async def fake_list(thread_id: str, *, raise_on_error: bool = False) -> list[dict[str, Any]]:
+        return [{"author": "bob", "body": "use snake_case"}]
+
+    async def fake_set_status(thread_id: str, status: str, *, plan_mode: Any = None) -> None:
+        return None
+
+    async def fake_dispatch(
+        thread_id: str, metadata: dict[str, Any], text: str, *, plan_mode: bool
+    ) -> None:
+        dispatched.update(text=text, plan_mode=plan_mode)
+
+    monkeypatch.setattr(plan_api, "_thread_metadata", fake_meta)
+    monkeypatch.setattr(plan_api, "_user_owns_thread", lambda *a, **k: True)
+    monkeypatch.setattr(plan_api, "get_plan_content", fake_get_content)
+    monkeypatch.setattr(plan_api, "list_plan_comments", fake_list)
+    monkeypatch.setattr(plan_api, "set_plan_status", fake_set_status)
+    monkeypatch.setattr(plan_api, "_dispatch_followup", fake_dispatch)
+
+    result = await plan_api.approve_plan("t1", session={"sub": "a", "email": None})
+    assert result["status"] == "approved"
+    # The (possibly edited) published plan is the source of truth, plus feedback.
+    assert "# Edited plan" in dispatched["text"]
+    assert "use snake_case" in dispatched["text"]
+    assert dispatched["plan_mode"] is False
+
+
+async def test_approve_plan_aborts_when_plan_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent.dashboard import plan_api
+
+    dispatched: list[Any] = []
+
+    async def fake_meta(thread_id: str) -> dict[str, Any]:
+        return {"plan_status": "ready"}
+
+    async def fake_get_content(thread_id: str, *, raise_on_error: bool = False) -> dict[str, Any]:
+        # A transient store failure must abort approval, not silently drop the
+        # owner's edited plan and dispatch the generic fallback text.
+        raise RuntimeError("store down")
+
+    async def fake_set_status(thread_id: str, status: str, *, plan_mode: Any = None) -> None:
+        return None
+
+    async def fake_dispatch(*a: Any, **k: Any) -> None:
+        dispatched.append((a, k))
+
+    monkeypatch.setattr(plan_api, "_thread_metadata", fake_meta)
+    monkeypatch.setattr(plan_api, "_user_owns_thread", lambda *a, **k: True)
+    monkeypatch.setattr(plan_api, "get_plan_content", fake_get_content)
+    monkeypatch.setattr(plan_api, "set_plan_status", fake_set_status)
+    monkeypatch.setattr(plan_api, "_dispatch_followup", fake_dispatch)
+
+    with pytest.raises(RuntimeError):
+        await plan_api.approve_plan("t1", session={"sub": "a", "email": None})
+    assert dispatched == []

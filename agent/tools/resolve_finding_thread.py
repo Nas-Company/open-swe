@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from langgraph.config import get_config
 
 from ..reviewer_findings import (
     Finding,
+    ReviewerThreadMissingError,
     get_finding,
     get_thread_id_from_runtime,
+    thread_missing_tool_result,
     update_finding_fields,
     update_finding_surface,
 )
@@ -31,7 +32,7 @@ def _normalize_note(note: str | None) -> str | None:
     return normalized or None
 
 
-def resolve_finding_thread(
+async def resolve_finding_thread(
     finding_id: str,
     note: str,
     status: str = "dismissed",
@@ -40,7 +41,7 @@ def resolve_finding_thread(
 
     Use ``status="resolved"`` when the code now fixes the issue. Use
     ``status="dismissed"`` when analysis shows the original review comment was
-    not valid. ``note`` is required and becomes the GitHub reply body.
+    not valid. ``note`` is required and is posted verbatim as the full GitHub reply body.
     """
     if status not in {"resolved", "dismissed"}:
         return {"success": False, "error": f"Invalid status: {status}"}
@@ -67,8 +68,8 @@ def resolve_finding_thread(
     if not token:
         return {"success": False, "error": "No GitHub token available"}
 
-    result = asyncio.run(
-        _resolve_finding_thread_async(
+    try:
+        result = await _resolve_finding_thread_async(
             finding_id=finding_id,
             status=status,
             note=normalized_note,
@@ -77,7 +78,8 @@ def resolve_finding_thread(
             pr_number=pr_number,
             token=token,
         )
-    )
+    except ReviewerThreadMissingError as exc:
+        return thread_missing_tool_result(exc)
     if result.get("success") and isinstance(result.get("finding"), dict):
         thread_id = configurable.get("thread_id") if isinstance(configurable, dict) else None
         emit_finding_status_outcome(
