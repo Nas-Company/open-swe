@@ -51,6 +51,7 @@ from .integrations.currents_tools import load_currents_tools
 from .integrations.datadog_mcp import load_datadog_tools
 from .integrations.langsmith import _configure_github_proxy
 from .integrations.langsmith_tools import load_langsmith_tools
+from .integrations.live_issue_mcp import load_live_issue_tools
 from .integrations.notion_mcp import load_notion_tools
 from .middleware import (
     ModelFallbackMiddleware,
@@ -613,6 +614,17 @@ async def _load_observability_tools(authorized: bool) -> list[Any]:
     return [*datadog_tools, *langsmith_tools]
 
 
+async def _load_live_issue_mcp_tools(authorized: bool) -> list[Any]:
+    """Production Live Issues MCP tools for authorized troubleshooting runs."""
+    if not authorized:
+        return []
+    try:
+        return await load_live_issue_tools()
+    except Exception:
+        logger.warning("Failed to load LIIS MCP tools", exc_info=True)
+        return []
+
+
 async def _load_corridor_mcp_tools() -> list[Any]:
     """Corridor MCP tools when the deployment environment has configured them."""
     try:
@@ -784,10 +796,12 @@ async def get_agent(config: RunnableConfig) -> Pregel:
 
     repo_custom_instructions = await _resolve_repo_custom_instructions(prompt_default_repo)
 
-    observability_tools = await _load_observability_tools(
-        await _observability_authorized(config, profile_login)
+    observability_authorized = await _observability_authorized(config, profile_login)
+    observability_tools, live_issue_tools, corridor_tools = await asyncio.gather(
+        _load_observability_tools(observability_authorized),
+        _load_live_issue_mcp_tools(observability_authorized),
+        _load_corridor_mcp_tools(),
     )
-    corridor_tools = await _load_corridor_mcp_tools()
 
     currents_tools: list[Any] = []
     notion_tools: list[Any] = []
@@ -820,6 +834,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
             repo_custom_instructions=repo_custom_instructions,
             thread_url=dashboard_thread_url(thread_id),
             corridor_enabled=bool(corridor_tools),
+            live_issue_enabled=bool(live_issue_tools),
         ),
         tools=[
             http_request,
@@ -840,6 +855,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
             slack_read_thread_messages,
             slack_thread_reply,
             *corridor_tools,
+            *live_issue_tools,
             *observability_tools,
             *currents_tools,
             *notion_tools,

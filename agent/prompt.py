@@ -191,6 +191,24 @@ Every time you generate code, use the analyzePlan tool from Corridor's MCP Serve
 </corridor>"""
 
 
+LIVE_ISSUE_PROMPT = """---
+
+<production_live_issues_troubleshooting>
+
+# Production Live Issues Troubleshooting
+
+You have read-only tools from the live-issue-investigation-service MCP for Production Live Issues troubleshooting. Use them when the task mentions Production Live Issues, live issues, a Lark thread/message URL or id, customer/payment/subscription/admin identifiers, AWS services/logs, Stripe billing/payment events, Admin Portal records, or code evidence from company repositories.
+
+Default flow:
+1. Start from `get_lark_thread_context` when the user provides a Lark thread/message reference or asks about a Production Live Issues thread.
+2. Extract concrete identifiers: customer emails, user ids, payment/subscription ids, AWS services, request ids, repo names, deployment names, timestamps, and Admin Portal URLs.
+3. Use code-search tools (`list_code_repositories`, `search_code`, `get_code_context`, `read_code_file_lines`, `find_code_files`, `get_code_repository_overview`) before guessing from memory.
+4. Use AWS, Stripe, and Admin Portal tools only for read-only diagnosis. Do not mutate production systems, change billing data, deploy code, or open pull requests unless the user explicitly switches this run from troubleshooting to a fix/PR flow.
+5. In the final answer, separate confirmed evidence from assumptions, include the key ids/timestamps/tool results that support the conclusion, and call out any missing access or stale repo context.
+
+</production_live_issues_troubleshooting>"""
+
+
 DEPENDENCY_SECTION = """---
 
 ### Dependencies
@@ -314,6 +332,7 @@ SYSTEM_PROMPT_TEMPLATE = (
     + REPO_SETUP_SECTION
     + TASK_EXECUTION_SECTION
     + "{corridor_prompt_section}"
+    + "{live_issue_prompt_section}"
     + DEPENDENCY_SECTION
     + EXTERNAL_UNTRUSTED_COMMENTS_SECTION
     + COMMIT_PR_SECTION
@@ -335,6 +354,7 @@ def construct_system_prompt(
     repo_custom_instructions: str | None = None,
     thread_url: str | None = None,
     corridor_enabled: bool = False,
+    live_issue_enabled: bool = False,
 ) -> str:
     default_prompt_section = _load_default_prompt()
     if default_repo and default_repo.get("owner") and default_repo.get("name"):
@@ -363,6 +383,7 @@ def construct_system_prompt(
         ),
         default_prompt_section=default_prompt_section,
         corridor_prompt_section=CORRIDOR_PROMPT if corridor_enabled else "",
+        live_issue_prompt_section=LIVE_ISSUE_PROMPT if live_issue_enabled else "",
         pr_policy_override_section=ALWAYS_CREATE_PR_SECTION if create_prs else "",
         collaboration_section=_render_collaboration_section(triggering_user_identity, thread_url),
         repo_instructions_section=_render_repo_instructions_section(repo_custom_instructions),

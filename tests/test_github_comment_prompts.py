@@ -119,6 +119,15 @@ def test_construct_system_prompt_includes_corridor_prompt_when_enabled() -> None
     assert "analyzePlan" in prompt
 
 
+def test_construct_system_prompt_includes_live_issue_prompt_when_enabled() -> None:
+    prompt = construct_system_prompt(working_dir="/workspace", live_issue_enabled=True)
+
+    assert "<production_live_issues_troubleshooting>" in prompt
+    assert "Production Live Issues Troubleshooting" in prompt
+    assert "get_lark_thread_context" in prompt
+    assert "Do not mutate production systems" in prompt
+
+
 def test_construct_system_prompt_omits_collaboration_section_without_identity() -> None:
     prompt = construct_system_prompt(working_dir="/workspace")
 
