@@ -941,8 +941,9 @@ async def _create_dashboard_thread_record(
     # commands endpoint, so we only need the validation side effect here.
     _user_message_content(prompt, images or [], model_id=resolved_model)
     chosen_model, chosen_effort = _normalize_model_choice(model_id, effort)
-    metadata_model = chosen_model or profile.get("default_model") or "Default"
-    metadata_effort = chosen_effort or profile.get("reasoning_effort")
+    profile_model, profile_effort = normalize_profile_overrides(profile)
+    metadata_model = chosen_model or profile_model or "Default"
+    metadata_effort = chosen_effort or profile_effort
     has_repo = bool(repo_config.get("owner") and repo_config.get("name"))
     metadata: dict[str, Any] = {
         "source": _DASHBOARD_SOURCE,

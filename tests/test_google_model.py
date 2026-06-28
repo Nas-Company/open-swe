@@ -19,25 +19,20 @@ def test_google_thinking_level_maps_effort() -> None:
     assert google_thinking_level_for("unknown") is None
 
 
-def test_gemini_35_flash_is_supported_with_documented_efforts() -> None:
-    gemini = next(m for m in SUPPORTED_MODELS if m["id"] == "google_genai:gemini-3.5-flash")
-    assert gemini["label"] == "Gemini 3.5 Flash"
-    assert gemini["efforts"] == ["minimal", "low", "medium", "high"]
-    assert gemini["default_effort"] == "medium"
-
-
-def test_google_provider_fallback_uses_gemini_35_flash() -> None:
-    assert provider_fallback_pair("google_genai:gemini-3-flash-preview", "high") == (
-        "google_genai:gemini-3.5-flash",
-        "high",
+def test_gemini_35_flash_is_hidden_from_supported_models() -> None:
+    gemini = next(
+        (m for m in SUPPORTED_MODELS if m["id"] == "google_genai:gemini-3.5-flash"),
+        None,
     )
+    assert gemini is None
 
 
-def test_google_provider_fallback_maps_legacy_none_to_minimal() -> None:
-    assert provider_fallback_pair("google_genai:gemini-3-flash-preview", "none") == (
-        "google_genai:gemini-3.5-flash",
-        "minimal",
-    )
+def test_google_provider_fallback_returns_none_while_hidden() -> None:
+    assert provider_fallback_pair("google_genai:gemini-3-flash-preview", "high") is None
+
+
+def test_google_provider_fallback_does_not_map_legacy_none_while_hidden() -> None:
+    assert provider_fallback_pair("google_genai:gemini-3-flash-preview", "none") is None
 
 
 def test_provider_model_kwargs_for_google() -> None:

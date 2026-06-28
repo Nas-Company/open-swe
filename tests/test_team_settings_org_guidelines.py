@@ -14,8 +14,8 @@ from agent.dashboard.team_settings import (
     get_team_review_tracing_project,
 )
 
-_AGENT_PAIR = ("anthropic:claude-opus-4-8", "high")
-_CHAT_PAIR = ("google_genai:gemini-3.5-flash", "low")
+_AGENT_PAIR = ("openai:gpt-5.5", "medium")
+_CHAT_PAIR = ("anthropic:claude-opus-4-8", "high")
 
 
 def test_org_guidelines_blank_normalizes_to_none() -> None:
@@ -141,4 +141,4 @@ def test_team_settings_update_rejects_chat_effort_without_model() -> None:
 
 def test_team_settings_update_rejects_unsupported_chat_effort() -> None:
     with pytest.raises(ValidationError):
-        TeamSettingsUpdate(default_chat_model=_CHAT_PAIR[0], default_chat_reasoning_effort="max")
+        TeamSettingsUpdate(default_chat_model=_CHAT_PAIR[0], default_chat_reasoning_effort="none")

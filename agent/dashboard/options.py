@@ -15,53 +15,25 @@ class ModelOption(TypedDict):
 
 SUPPORTED_MODELS: list[ModelOption] = [
     {
-        "id": "anthropic:claude-opus-4-8",
-        "label": "Opus 4.8",
-        "efforts": ["low", "medium", "high", "xhigh", "max"],
-        "default_effort": "high",
-        "supports_images": True,
-    },
-    {
         "id": "openai:gpt-5.5",
-        "label": "GPT-5.5",
-        "efforts": ["none", "low", "medium", "high", "xhigh"],
-        "default_effort": "xhigh",
-        "supports_images": True,
-    },
-    {
-        "id": "google_genai:gemini-3.5-flash",
-        "label": "Gemini 3.5 Flash",
-        "efforts": ["minimal", "low", "medium", "high"],
+        "label": "Codex Proxy GPT-5.5",
+        "efforts": ["low", "medium", "high", "xhigh"],
         "default_effort": "medium",
         "supports_images": True,
     },
     {
-        "id": "fireworks:accounts/fireworks/models/kimi-k2p7-code",
-        "label": "Kimi K2.7",
-        "efforts": ["low", "medium", "high"],
+        "id": "anthropic:claude-opus-4-8",
+        "label": "MiniMax",
+        "efforts": ["low", "medium", "high", "xhigh", "max"],
         "default_effort": "high",
-        "supports_images": False,
-    },
-    {
-        "id": "fireworks:accounts/fireworks/models/deepseek-v4-pro",
-        "label": "DeepSeek V4 Pro",
-        "efforts": ["none", "low", "medium", "high", "xhigh", "max"],
-        "default_effort": "high",
-        "supports_images": False,
-    },
-    {
-        "id": "fireworks:accounts/fireworks/models/glm-5p2",
-        "label": "GLM 5.2",
-        "efforts": ["none", "high", "max"],
-        "default_effort": "high",
-        "supports_images": False,
+        "supports_images": True,
     },
 ]
 
 SUPPORTED_MODEL_IDS: frozenset[str] = frozenset(m["id"] for m in SUPPORTED_MODELS)
 
-DEFAULT_MODEL_ID: str = "anthropic:claude-opus-4-8"
-DEFAULT_MODEL_EFFORT: str = "high"
+DEFAULT_MODEL_ID: str = "openai:gpt-5.5"
+DEFAULT_MODEL_EFFORT: str = "medium"
 
 
 def model_supports_effort(model_id: str, effort: str) -> bool:

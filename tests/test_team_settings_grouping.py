@@ -11,7 +11,7 @@ from agent.dashboard.team_settings import (
 )
 
 _REVIEWER_SUBAGENT_PAIR = ("openai:gpt-5.5", "low")
-_GROUPING_PAIR = ("google_genai:gemini-3.5-flash", "low")
+_GROUPING_PAIR = ("anthropic:claude-opus-4-8", "high")
 
 
 def _settings(**overrides: object) -> dict[str, object]:
@@ -79,5 +79,5 @@ def test_team_settings_update_rejects_unsupported_grouping_effort() -> None:
     with pytest.raises(ValidationError):
         TeamSettingsUpdate(
             default_grouping_model=_GROUPING_PAIR[0],
-            default_grouping_reasoning_effort="max",
+            default_grouping_reasoning_effort="none",
         )

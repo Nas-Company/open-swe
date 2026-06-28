@@ -9,7 +9,8 @@ from agent.dashboard import thread_api
 from agent.dashboard.agent_overrides import resolve_agent_model_id
 from agent.dashboard.options import model_supports_images
 
-_TEXT_ONLY_MODEL = "fireworks:accounts/fireworks/models/deepseek-v4-pro"
+_HIDDEN_TEXT_ONLY_MODEL = "fireworks:accounts/fireworks/models/deepseek-v4-pro"
+_MINIMAX_MODEL = "anthropic:claude-opus-4-8"
 _VISION_MODEL = "openai:gpt-5.5"
 
 
@@ -21,13 +22,17 @@ def _image() -> thread_api.DashboardImageBody:
 
 
 def test_model_supports_images_marks_text_only_fireworks_models() -> None:
-    assert not model_supports_images(_TEXT_ONLY_MODEL)
+    assert not model_supports_images(_HIDDEN_TEXT_ONLY_MODEL)
     assert model_supports_images(_VISION_MODEL)
 
 
 def test_user_message_content_rejects_images_for_text_only_model() -> None:
     with pytest.raises(HTTPException) as exc_info:
-        thread_api._user_message_content("see attached", [_image()], model_id=_TEXT_ONLY_MODEL)
+        thread_api._user_message_content(
+            "see attached",
+            [_image()],
+            model_id=_HIDDEN_TEXT_ONLY_MODEL,
+        )
 
     assert exc_info.value.status_code == 422
     assert "does not support image input" in exc_info.value.detail
@@ -58,12 +63,12 @@ async def test_resolve_agent_model_choice_applies_profile_before_team_default(mo
     monkeypatch.setattr(thread_api, "get_team_default_model", fake_team_default)
 
     model_id, effort = await thread_api._resolve_agent_model_choice(
-        {"default_model": _TEXT_ONLY_MODEL, "reasoning_effort": "high"},
+        {"default_model": _MINIMAX_MODEL, "reasoning_effort": "high"},
         None,
         None,
     )
 
-    assert (model_id, effort) == (_TEXT_ONLY_MODEL, "high")
+    assert (model_id, effort) == (_MINIMAX_MODEL, "high")
 
 
 async def test_resolve_agent_model_choice_applies_request_before_profile(monkeypatch) -> None:
@@ -74,28 +79,28 @@ async def test_resolve_agent_model_choice_applies_request_before_profile(monkeyp
     monkeypatch.setattr(thread_api, "get_team_default_model", fake_team_default)
 
     model_id, effort = await thread_api._resolve_agent_model_choice(
-        {"default_model": _TEXT_ONLY_MODEL, "reasoning_effort": "high"},
-        "anthropic:claude-opus-4-8",
+        {"default_model": _MINIMAX_MODEL, "reasoning_effort": "high"},
+        _VISION_MODEL,
         "high",
     )
 
-    assert (model_id, effort) == ("anthropic:claude-opus-4-8", "high")
+    assert (model_id, effort) == (_VISION_MODEL, "high")
 
 
 async def test_resolve_agent_model_id_defaults_to_team_default(monkeypatch) -> None:
     async def fake_team_default(role: str) -> tuple[str, str]:
-        return _TEXT_ONLY_MODEL, "high"
+        return _MINIMAX_MODEL, "high"
 
     monkeypatch.setattr("agent.dashboard.agent_overrides.get_team_default_model", fake_team_default)
     monkeypatch.setattr("agent.dashboard.agent_overrides.load_profile", lambda login: None)
 
     model_id = await resolve_agent_model_id(None)
-    assert model_id == _TEXT_ONLY_MODEL
+    assert model_id == _MINIMAX_MODEL
 
 
 async def test_resolve_agent_model_id_applies_profile_override(monkeypatch) -> None:
     async def fake_team_default(role: str) -> tuple[str, str]:
-        return _TEXT_ONLY_MODEL, "high"
+        return _MINIMAX_MODEL, "high"
 
     monkeypatch.setattr("agent.dashboard.agent_overrides.get_team_default_model", fake_team_default)
 
@@ -110,7 +115,7 @@ async def test_resolve_agent_model_id_applies_profile_override(monkeypatch) -> N
 
 async def test_resolve_agent_model_id_applies_per_thread_override(monkeypatch) -> None:
     async def fake_team_default(role: str) -> tuple[str, str]:
-        return _TEXT_ONLY_MODEL, "high"
+        return _MINIMAX_MODEL, "high"
 
     monkeypatch.setattr("agent.dashboard.agent_overrides.get_team_default_model", fake_team_default)
     monkeypatch.setattr("agent.dashboard.agent_overrides.load_profile", lambda login: None)
@@ -207,13 +212,13 @@ async def test_enrich_run_start_command_creates_and_stamps_new_thread(monkeypatc
     assert enriched["params"]["assistant_id"] == "agent"
 
 
-async def test_enrich_run_start_command_rejects_images_for_resolved_text_only_model(
+async def test_enrich_run_start_command_allows_images_after_hidden_profile_falls_back(
     monkeypatch,
 ) -> None:
     created: dict[str, object] = {}
     _patch_new_thread_deps(
         monkeypatch,
-        profile={"default_model": _TEXT_ONLY_MODEL, "reasoning_effort": "high"},
+        profile={"default_model": _HIDDEN_TEXT_ONLY_MODEL, "reasoning_effort": "high"},
     )
     monkeypatch.setattr(thread_api, "langgraph_client", lambda: _new_thread_client(created))
 
@@ -240,17 +245,21 @@ async def test_enrich_run_start_command_rejects_images_for_resolved_text_only_mo
         },
     }
 
-    with pytest.raises(HTTPException) as exc_info:
-        await thread_api._enrich_run_start_command(
-            "new-tid",
-            "octocat",
-            command,
-            metadata={},
-            creating=True,
-        )
+    enriched = await thread_api._enrich_run_start_command(
+        "new-tid",
+        "octocat",
+        command,
+        metadata={},
+        creating=True,
+    )
 
-    assert exc_info.value.status_code == 422
-    assert "does not support image input" in exc_info.value.detail
+    configurable = enriched["params"]["config"]["configurable"]
+    assert "agent_model_id" not in configurable
+    assert "agent_effort" not in configurable
+    assert created["metadata"]["model"] == "Default"
+    assert created["metadata"]["effort"] is None
+    assert created["metadata"]["resolved_model"] == _VISION_MODEL
+    assert created["metadata"]["resolved_effort"] == "medium"
 
 
 def _thread_with_metadata(metadata: dict) -> dict:
