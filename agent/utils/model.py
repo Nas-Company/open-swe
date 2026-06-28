@@ -50,13 +50,38 @@ class ModelKwargs(TypedDict, total=False):
 _ANTHROPIC_EFFORTS: set[AnthropicEffort] = {"low", "medium", "high", "xhigh", "max"}
 
 
+def _env_value(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def openai_base_url() -> str:
+    return (
+        _env_value("CODEX_PROXY_BASE_URL")
+        or _env_value("OPENAI_BASE_URL")
+        or OPENAI_RESPONSES_WS_BASE_URL
+    ).rstrip("/")
+
+
+def openai_api_key() -> str | None:
+    if _env_value("CODEX_PROXY_BASE_URL") or _env_value("OPENAI_BASE_URL"):
+        return _env_value("CODEX_PROXY_API_KEY") or _env_value("OPENAI_API_KEY")
+    return _env_value("OPENAI_API_KEY")
+
+
 def make_model(model_id: str, **kwargs: Unpack[ModelKwargs]):
     model_kwargs: dict[str, object] = kwargs.copy()
     model_kwargs.setdefault("max_retries", DEFAULT_MAX_RETRIES)
 
     if model_id.startswith("openai:"):
-        model_kwargs["base_url"] = OPENAI_RESPONSES_WS_BASE_URL
+        api_key = openai_api_key()
+        model_kwargs["base_url"] = openai_base_url()
         model_kwargs["use_responses_api"] = True
+        if api_key:
+            model_kwargs["api_key"] = api_key
 
     return init_chat_model(model=model_id, **model_kwargs)
 
@@ -204,8 +229,11 @@ def validate_local_dev_llm_config() -> None:
 
     model_id = os.environ.get("LLM_MODEL_ID", DEFAULT_MODEL_ID)
 
-    if model_id.startswith("openai:") and not os.environ.get("OPENAI_API_KEY"):
-        raise ValueError(f"OPENAI_API_KEY is required for configured model {model_id}")
+    if model_id.startswith("openai:") and not openai_api_key():
+        raise ValueError(
+            f"OPENAI_API_KEY or CODEX_PROXY_API_KEY with a custom base URL is required for "
+            f"configured model {model_id}"
+        )
     elif model_id.startswith("anthropic:") and not os.environ.get("ANTHROPIC_API_KEY"):
         raise ValueError(f"ANTHROPIC_API_KEY is required for configured model {model_id}")
     elif model_id.startswith("google_genai:") and not os.environ.get("GOOGLE_API_KEY"):
