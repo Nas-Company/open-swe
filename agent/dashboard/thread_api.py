@@ -1303,8 +1303,6 @@ async def create_dashboard_thread_run(
         _ASSISTANT_ID,
         input={"messages": [{"role": "user", "content": content}]},
         config={"configurable": configurable},
-        stream_mode=list(_DASHBOARD_STREAM_MODES),
-        stream_resumable=True,
         metadata=_agent_version_metadata(),
     )
     run_id = (

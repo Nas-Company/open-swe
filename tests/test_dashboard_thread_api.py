@@ -691,6 +691,8 @@ async def test_create_dashboard_thread_run_creates_thread_and_run(monkeypatch) -
     assert created["metadata"]["latest_run_status"] == "pending"
     assert runs[0]["thread_id"] == "tid"
     assert runs[0]["assistant_id"] == "agent"
+    assert "stream_mode" not in runs[0]
+    assert "stream_resumable" not in runs[0]
     configurable = runs[0]["config"]["configurable"]
     assert configurable["github_login"] == "octocat"
     assert configurable["user_email"] == "octocat@example.com"
