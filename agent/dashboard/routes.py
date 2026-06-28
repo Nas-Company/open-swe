@@ -163,6 +163,7 @@ from .thread_api import (
     proxy_dashboard_thread_commands,
     proxy_dashboard_thread_history,
     proxy_dashboard_thread_run_cancel,
+    proxy_dashboard_thread_runs_stream,
     proxy_dashboard_thread_stream_events,
     proxy_dashboard_threads_create,
     resolve_dashboard_thread,
@@ -1663,6 +1664,31 @@ async def api_thread_stream_events(
         stream,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+@router.post("/threads/{thread_id}/runs/stream")
+async def api_thread_runs_stream(
+    thread_id: str,
+    request: Request,
+    session: dict[str, Any] = _SESSION_DEP,
+) -> StreamingResponse:
+    body = await request.body()
+    stream, headers = await proxy_dashboard_thread_runs_stream(
+        thread_id,
+        session["sub"],
+        body,
+        email=session.get("email"),
+        content_type=request.headers.get("content-type", "application/json"),
+    )
+    return StreamingResponse(
+        stream,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            **headers,
+        },
     )
 
 

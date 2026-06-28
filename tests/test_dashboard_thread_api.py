@@ -494,6 +494,131 @@ async def test_proxy_threads_create_forwards_to_langgraph(monkeypatch) -> None:
     ]
 
 
+async def test_proxy_runs_stream_stamps_empty_dashboard_thread(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeThreads:
+        def __init__(self) -> None:
+            self.metadata: dict[str, object] = {}
+
+        async def get(self, thread_id: str) -> dict[str, object]:
+            assert thread_id == "tid"
+            return {"thread_id": thread_id, "metadata": self.metadata, "status": "idle"}
+
+        async def create(
+            self,
+            *,
+            thread_id: str,
+            metadata: dict[str, object],
+            if_exists: str,
+        ) -> None:
+            assert thread_id == "tid"
+            assert if_exists == "do_nothing"
+            self.metadata = metadata
+
+        async def update(self, *, thread_id: str, metadata: dict[str, object]) -> None:
+            assert thread_id == "tid"
+            self.metadata = metadata
+
+    fake_threads = FakeThreads()
+
+    class FakeClient:
+        threads = fake_threads
+
+    class FakeStreamResponse:
+        status_code = 200
+        headers = {"content-location": "/threads/tid/runs/run-1"}
+        reason_phrase = "OK"
+
+        async def aiter_bytes(self):
+            yield b"data: {}\n\n"
+
+        async def aclose(self) -> None:
+            pass
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: object) -> None:
+            self.timeout = timeout
+
+        def build_request(self, method: str, url: str, *, content: bytes, headers: dict[str, str]):
+            captured["method"] = method
+            captured["url"] = url
+            captured["content"] = content
+            captured["headers"] = headers
+            return SimpleNamespace()
+
+        async def send(self, request: object, *, stream: bool) -> FakeStreamResponse:
+            assert stream is True
+            return FakeStreamResponse()
+
+        async def aclose(self) -> None:
+            pass
+
+    async def fake_get_profile(login: str) -> dict[str, object]:
+        assert login == "octocat"
+        return {}
+
+    async def fake_ensure_token(login: str) -> None:
+        assert login == "octocat"
+
+    async def fake_resolve_email(login: str, profile: dict[str, object]) -> str:
+        assert login == "octocat"
+        return "octocat@example.com"
+
+    async def fake_team_default(role: str) -> tuple[str, str]:
+        assert role == "agent"
+        return _VISION_MODEL, "medium"
+
+    monkeypatch.setenv("LANGSMITH_API_KEY", "ls-key")
+    monkeypatch.setattr(thread_api, "langgraph_client", lambda: FakeClient())
+    monkeypatch.setattr(thread_api, "langgraph_url", lambda: "https://lg.example")
+    monkeypatch.setattr(thread_api.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(thread_api, "get_profile", fake_get_profile)
+    monkeypatch.setattr(thread_api, "_ensure_dashboard_github_token", fake_ensure_token)
+    monkeypatch.setattr(thread_api, "_resolve_run_email", fake_resolve_email)
+    monkeypatch.setattr(thread_api, "get_team_default_model", fake_team_default)
+
+    body = json.dumps(
+        {
+            "input": {"messages": [{"type": "human", "content": "hello"}]},
+            "assistant_id": "agent",
+            "config": {
+                "configurable": {
+                    "repo": "Nas-Company/open-swe",
+                    "agent_model_id": _VISION_MODEL,
+                    "agent_effort": "high",
+                }
+            },
+        }
+    ).encode()
+
+    stream, headers = await thread_api.proxy_dashboard_thread_runs_stream(
+        "tid", "octocat", body, email="octocat@example.com"
+    )
+    chunks = [chunk async for chunk in stream]
+
+    assert chunks == [b"data: {}\n\n"]
+    assert headers == {"Content-Location": "/threads/tid/runs/run-1"}
+    assert fake_threads.metadata["github_login"] == "octocat"
+    assert fake_threads.metadata["repo_owner"] == "Nas-Company"
+    assert fake_threads.metadata["repo_name"] == "open-swe"
+    assert fake_threads.metadata["title"] == "hello"
+    assert captured["method"] == "POST"
+    assert captured["url"] == "https://lg.example/threads/tid/runs/stream"
+    assert captured["headers"] == {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "X-API-Key": "ls-key",
+    }
+    forwarded = json.loads(captured["content"])
+    assert forwarded["config"]["configurable"]["github_login"] == "octocat"
+    assert forwarded["config"]["configurable"]["user_email"] == "octocat@example.com"
+    assert forwarded["config"]["configurable"]["repo"] == {
+        "owner": "Nas-Company",
+        "name": "open-swe",
+    }
+
+
 async def test_enrich_run_start_command_attributes_non_owner_message(monkeypatch) -> None:
     class FakeThreads:
         async def update(self, *, thread_id: str, metadata: dict[str, object]) -> None:

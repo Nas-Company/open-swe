@@ -1727,6 +1727,87 @@ async def proxy_dashboard_threads_create(
     return response.status_code, response.content, media_type
 
 
+async def proxy_dashboard_thread_runs_stream(
+    thread_id: str,
+    login: str,
+    body: bytes,
+    *,
+    email: str | None = None,
+    content_type: str = "application/json",
+) -> tuple[AsyncIterator[bytes], dict[str, str]]:
+    _require_json_content_type(content_type)
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "run body must be a JSON object") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(400, "run body must be a JSON object")
+
+    try:
+        thread = await langgraph_client().threads.get(thread_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(404, "thread not found") from exc
+
+    metadata = thread.get("metadata") if isinstance(thread.get("metadata"), dict) else {}
+    _assert_thread_readable(metadata)
+    metadata_run_status = metadata.get("latest_run_status")
+    thread_busy = _thread_is_busy(thread) or metadata_run_status in {"pending", "running"}
+    creating = not bool(metadata.get("github_login") or metadata.get("triggering_user_email"))
+
+    command = {"method": "run.start", "params": parsed}
+    enriched = await _enrich_run_start_command(
+        thread_id,
+        login,
+        command,
+        metadata=metadata,
+        thread_busy=thread_busy,
+        creating=creating,
+        email=email,
+    )
+    params = enriched.get("params")
+    if not isinstance(params, dict):
+        raise HTTPException(400, "run body must be a JSON object")
+
+    return await _open_thread_runs_stream(thread_id, json.dumps(params).encode(), content_type)
+
+
+async def _open_thread_runs_stream(
+    thread_id: str,
+    body: bytes,
+    content_type: str,
+) -> tuple[AsyncIterator[bytes], dict[str, str]]:
+    url = f"{langgraph_url().rstrip('/')}/threads/{thread_id}/runs/stream"
+    headers = _langgraph_proxy_headers(content_type=content_type, accept="text/event-stream")
+    client = httpx.AsyncClient(timeout=_PROXY_STREAM_TIMEOUT)
+    request = client.build_request("POST", url, content=body, headers=headers)
+    response = await client.send(request, stream=True)
+
+    response_headers: dict[str, str] = {}
+    content_location = response.headers.get("content-location")
+    if content_location:
+        response_headers["Content-Location"] = content_location
+
+    async def iterator() -> AsyncIterator[bytes]:
+        try:
+            if response.status_code >= 400:
+                error_body = await response.aread()
+                payload = {
+                    "status": response.status_code,
+                    "detail": error_body.decode(errors="replace") or response.reason_phrase,
+                }
+                yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode()
+                return
+            async for chunk in response.aiter_bytes():
+                yield chunk
+        except Exception:
+            logger.warning("LangGraph runs/stream proxy closed for %s", thread_id, exc_info=True)
+        finally:
+            await response.aclose()
+            await client.aclose()
+
+    return iterator(), response_headers
+
+
 async def proxy_dashboard_thread_commands(
     thread_id: str,
     login: str,
