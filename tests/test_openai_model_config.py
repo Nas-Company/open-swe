@@ -30,7 +30,7 @@ def test_make_model_uses_codex_proxy_config(monkeypatch: pytest.MonkeyPatch) -> 
             max_tokens=16_000,
             max_retries=model.DEFAULT_MAX_RETRIES,
             base_url="http://codex-proxy:8080/v1",
-            use_responses_api=True,
+            use_responses_api=False,
             api_key="proxy-key",
         )
 
@@ -46,6 +46,7 @@ def test_make_model_uses_openai_base_url_with_codex_proxy_key(
     kwargs = init.call_args.kwargs
     assert kwargs["base_url"] == "https://codex-proxy.example.com/v1"
     assert kwargs["api_key"] == "proxy-key"
+    assert kwargs["use_responses_api"] is True
 
 
 def test_make_model_does_not_send_codex_proxy_key_to_default_openai(
@@ -70,6 +71,17 @@ def test_make_model_uses_openai_api_key_for_default_openai(
     kwargs = init.call_args.kwargs
     assert kwargs["base_url"] == model.OPENAI_RESPONSES_WS_BASE_URL
     assert kwargs["api_key"] == "openai-key"
+    assert kwargs["use_responses_api"] is True
+
+
+def test_provider_model_kwargs_omits_reasoning_for_codex_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODEX_PROXY_BASE_URL", "https://codexproxy.example.com/v1")
+
+    kwargs = model.provider_model_kwargs("openai:gpt-5.5", "xhigh", max_tokens=16_000)
+
+    assert kwargs == {"max_tokens": 16_000}
 
 
 def test_validate_local_dev_llm_config_accepts_codex_proxy_config(

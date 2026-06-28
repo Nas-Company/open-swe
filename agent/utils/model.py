@@ -72,6 +72,10 @@ def openai_api_key() -> str | None:
     return _env_value("OPENAI_API_KEY")
 
 
+def using_codex_proxy() -> bool:
+    return bool(_env_value("CODEX_PROXY_BASE_URL"))
+
+
 def make_model(model_id: str, **kwargs: Unpack[ModelKwargs]):
     model_kwargs: dict[str, object] = kwargs.copy()
     model_kwargs.setdefault("max_retries", DEFAULT_MAX_RETRIES)
@@ -79,7 +83,7 @@ def make_model(model_id: str, **kwargs: Unpack[ModelKwargs]):
     if model_id.startswith("openai:"):
         api_key = openai_api_key()
         model_kwargs["base_url"] = openai_base_url()
-        model_kwargs["use_responses_api"] = True
+        model_kwargs["use_responses_api"] = not using_codex_proxy()
         if api_key:
             model_kwargs["api_key"] = api_key
 
@@ -192,11 +196,12 @@ def provider_model_kwargs(
     """Build provider-specific kwargs for ``make_model`` from a model id and effort."""
     kwargs: ModelKwargs = {"max_tokens": max_tokens}
     if model_id.startswith("openai:"):
-        reasoning = openai_reasoning_for(profile_effort)
-        if reasoning is not None:
-            kwargs["reasoning"] = reasoning
-        elif openai_reasoning_default is not None:
-            kwargs["reasoning"] = openai_reasoning_default
+        if not using_codex_proxy():
+            reasoning = openai_reasoning_for(profile_effort)
+            if reasoning is not None:
+                kwargs["reasoning"] = reasoning
+            elif openai_reasoning_default is not None:
+                kwargs["reasoning"] = openai_reasoning_default
     elif model_id.startswith("anthropic:"):
         thinking = anthropic_thinking_for(profile_effort)
         if thinking is not None:
