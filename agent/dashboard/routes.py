@@ -164,6 +164,7 @@ from .thread_api import (
     proxy_dashboard_thread_history,
     proxy_dashboard_thread_run_cancel,
     proxy_dashboard_thread_stream_events,
+    proxy_dashboard_threads_create,
     resolve_dashboard_thread,
     send_dashboard_message,
     stream_dashboard_thread,
@@ -1473,6 +1474,19 @@ async def api_list_threads(
     if all and not _session_is_admin(session):
         raise HTTPException(403, "admin only")
     return await list_dashboard_threads(session["sub"], email=session.get("email"), include_all=all)
+
+
+@router.post("/threads")
+async def api_create_thread_for_stream_provider(
+    request: Request,
+    session: dict[str, Any] = _SESSION_DEP,
+) -> Response:
+    body = await request.body()
+    status_code, content, media_type = await proxy_dashboard_threads_create(
+        body,
+        content_type=request.headers.get("content-type", "application/json"),
+    )
+    return Response(content=content, status_code=status_code, media_type=media_type)
 
 
 @router.get("/threads/sidebar")

@@ -1706,6 +1706,27 @@ async def _stream_thread_events(
         logger.warning("LangGraph stream/events proxy closed for %s", thread_id, exc_info=True)
 
 
+async def proxy_dashboard_threads_create(
+    body: bytes,
+    *,
+    content_type: str = "application/json",
+) -> tuple[int, bytes, str | None]:
+    _require_json_content_type(content_type)
+    try:
+        parsed = json.loads(body or b"{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "thread body must be a JSON object") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(400, "thread body must be a JSON object")
+
+    url = f"{langgraph_url().rstrip('/')}/threads"
+    headers = _langgraph_proxy_headers(content_type=content_type)
+    async with httpx.AsyncClient(timeout=_PROXY_REQUEST_TIMEOUT) as client:
+        response = await client.post(url, content=body or b"{}", headers=headers)
+    media_type = response.headers.get("content-type")
+    return response.status_code, response.content, media_type
+
+
 async def proxy_dashboard_thread_commands(
     thread_id: str,
     login: str,

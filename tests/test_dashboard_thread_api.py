@@ -452,6 +452,48 @@ async def test_proxy_commands_lazily_creates_missing_thread_only_for_run_start(
     assert exc_info.value.status_code == 404
 
 
+async def test_proxy_threads_create_forwards_to_langgraph(monkeypatch) -> None:
+    requests: list[dict[str, object]] = []
+
+    class FakeResponse:
+        status_code = 200
+        content = b'{"thread_id":"tid"}'
+        headers = {"content-type": "application/json"}
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: object) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> FakeResponse:
+            requests.append({"url": url, "content": content, "headers": headers})
+            return FakeResponse()
+
+    monkeypatch.setenv("LANGSMITH_API_KEY", "ls-key")
+    monkeypatch.setattr(thread_api, "langgraph_url", lambda: "https://lg.example")
+    monkeypatch.setattr(thread_api.httpx, "AsyncClient", FakeAsyncClient)
+
+    status_code, content, media_type = await thread_api.proxy_dashboard_threads_create(
+        b'{"metadata":{"source":"dashboard"}}'
+    )
+
+    assert status_code == 200
+    assert content == b'{"thread_id":"tid"}'
+    assert media_type == "application/json"
+    assert requests == [
+        {
+            "url": "https://lg.example/threads",
+            "content": b'{"metadata":{"source":"dashboard"}}',
+            "headers": {"Content-Type": "application/json", "X-API-Key": "ls-key"},
+        }
+    ]
+
+
 async def test_enrich_run_start_command_attributes_non_owner_message(monkeypatch) -> None:
     class FakeThreads:
         async def update(self, *, thread_id: str, metadata: dict[str, object]) -> None:
