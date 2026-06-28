@@ -15,6 +15,13 @@ def _observability_emails() -> frozenset[str]:
     return frozenset(entry.strip().lower() for entry in raw.split(",") if entry.strip())
 
 
+def _live_issue_emails() -> frozenset[str]:
+    values: list[str] = []
+    for name in ("LIIS_AUTHORIZED_EMAILS", "LIVE_ISSUE_AUTHORIZED_EMAILS"):
+        values.extend(os.environ.get(name, "").split(","))
+    return frozenset(entry.strip().lower() for entry in values if entry.strip())
+
+
 def _admin_identities(email: str | None, login: str | None) -> frozenset[str]:
     return frozenset(
         value.strip().lower()
@@ -35,3 +42,13 @@ def is_observability_authorized(email: str | None, *, login: str | None = None) 
     if not email:
         return False
     return email.strip().lower() in _observability_emails()
+
+
+def is_live_issue_authorized(email: str | None, *, login: str | None = None) -> bool:
+    """Whether a user may use Production Live Issues troubleshooting tools."""
+    identities = _admin_identities(email, login)
+    if identities & _configured_admins():
+        return True
+    if not email:
+        return False
+    return email.strip().lower() in _live_issue_emails()

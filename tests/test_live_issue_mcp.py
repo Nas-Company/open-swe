@@ -268,6 +268,12 @@ async def test_get_agent_passes_live_issue_prompt_state() -> None:
                 return_value=True,
             ),
             patch.object(
+                server,
+                "_live_issue_authorized",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
                 server, "_load_observability_tools", new_callable=AsyncMock, return_value=[]
             ),
             patch.object(
