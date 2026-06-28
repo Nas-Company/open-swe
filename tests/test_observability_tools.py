@@ -240,20 +240,6 @@ async def test_observability_authorized_allowlist(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
-async def test_live_issue_authorized_uses_liis_allowlist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("CONFIGURED_ADMINS", "")
-    monkeypatch.setenv("LIIS_AUTHORIZED_EMAILS", "trusted@example.com")
-    monkeypatch.delenv("OBSERVABILITY_AUTHORIZED_EMAILS", raising=False)
-    monkeypatch.setattr(server, "email_for_login", AsyncMock(return_value=None))
-
-    config = {"configurable": {"user_email": "trusted@example.com"}}
-    assert await server._live_issue_authorized(config, None) is True
-    assert await server._observability_authorized(config, None) is False
-
-
-@pytest.mark.asyncio
 async def test_observability_authorized_resolves_login_email(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

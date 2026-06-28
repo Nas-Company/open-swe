@@ -232,7 +232,7 @@ async def test_get_agent_passes_live_issue_prompt_state() -> None:
 
         return _DummyAgent()
 
-    async def run_with_live_issue_tools(live_issue_tools: list[object]) -> bool:
+    async def run_with_live_issue_tools(live_issue_tools: list[object]) -> tuple[bool, object]:
         with (
             patch.object(
                 server,
@@ -265,13 +265,7 @@ async def test_get_agent_passes_live_issue_prompt_state() -> None:
                 server,
                 "_observability_authorized",
                 new_callable=AsyncMock,
-                return_value=True,
-            ),
-            patch.object(
-                server,
-                "_live_issue_authorized",
-                new_callable=AsyncMock,
-                return_value=True,
+                return_value=False,
             ),
             patch.object(
                 server, "_load_observability_tools", new_callable=AsyncMock, return_value=[]
@@ -281,7 +275,7 @@ async def test_get_agent_passes_live_issue_prompt_state() -> None:
                 "_load_live_issue_mcp_tools",
                 new_callable=AsyncMock,
                 return_value=live_issue_tools,
-            ),
+            ) as load_live_issue,
             patch.object(
                 server,
                 "_load_corridor_mcp_tools",
@@ -292,7 +286,14 @@ async def test_get_agent_passes_live_issue_prompt_state() -> None:
             patch.object(server, "create_deep_agent", side_effect=fake_create_deep_agent),
         ):
             await server.get_agent(config)
-        return bool(prompt.call_args.kwargs["live_issue_enabled"])
+        return bool(prompt.call_args.kwargs["live_issue_enabled"]), load_live_issue
 
-    assert await run_with_live_issue_tools([]) is False
-    assert await run_with_live_issue_tools([_fake_tool("get_lark_thread_context")]) is True
+    live_issue_enabled, load_live_issue = await run_with_live_issue_tools([])
+    assert live_issue_enabled is False
+    load_live_issue.assert_awaited_once_with(True)
+
+    live_issue_enabled, load_live_issue = await run_with_live_issue_tools(
+        [_fake_tool("get_lark_thread_context")]
+    )
+    assert live_issue_enabled is True
+    load_live_issue.assert_awaited_once_with(True)

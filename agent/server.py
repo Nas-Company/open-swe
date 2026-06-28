@@ -30,7 +30,7 @@ from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT, SubAgent
 from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain_core.language_models import BaseChatModel
 
-from .dashboard.admin import is_live_issue_authorized, is_observability_authorized
+from .dashboard.admin import is_observability_authorized
 from .dashboard.agent_overrides import (
     load_profile,
     normalize_profile_overrides,
@@ -593,21 +593,6 @@ async def _observability_authorized(config: RunnableConfig, profile_login: str |
     )
 
 
-async def _live_issue_authorized(config: RunnableConfig, profile_login: str | None) -> bool:
-    """Resolve whether the triggering user may use Production Live Issues tools."""
-    configurable = (config or {}).get("configurable") or {}
-    slack_thread = configurable.get("slack_thread") or {}
-    config_login = configurable.get("github_login")
-    candidate_login = profile_login or (config_login if isinstance(config_login, str) else None)
-    candidate_emails = [
-        configurable.get("user_email"),
-        slack_thread.get("triggering_user_email"),
-    ]
-    if any(is_live_issue_authorized(email, login=candidate_login) for email in candidate_emails):
-        return True
-    return is_live_issue_authorized(await email_for_login(candidate_login), login=candidate_login)
-
-
 async def _load_observability_tools(authorized: bool) -> list[Any]:
     """Datadog (MCP) + LangSmith read tools when the team has connected them.
 
@@ -630,7 +615,7 @@ async def _load_observability_tools(authorized: bool) -> list[Any]:
 
 
 async def _load_live_issue_mcp_tools(authorized: bool) -> list[Any]:
-    """Production Live Issues MCP tools for authorized troubleshooting runs."""
+    """Production Live Issues MCP tools for all runs when configured."""
     if not authorized:
         return []
     try:
@@ -812,10 +797,9 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     repo_custom_instructions = await _resolve_repo_custom_instructions(prompt_default_repo)
 
     observability_authorized = await _observability_authorized(config, profile_login)
-    live_issue_authorized = await _live_issue_authorized(config, profile_login)
     observability_tools, live_issue_tools, corridor_tools = await asyncio.gather(
         _load_observability_tools(observability_authorized),
-        _load_live_issue_mcp_tools(live_issue_authorized),
+        _load_live_issue_mcp_tools(True),
         _load_corridor_mcp_tools(),
     )
 
