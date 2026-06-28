@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.tools import StructuredTool
 
 from agent import server
 from agent.integrations import live_issue_mcp
 
 
-class _FakeTool:
-    def __init__(self, name: str) -> None:
-        self.name = name
+def _fake_tool(name: str, response: object | None = None) -> StructuredTool:
+    async def fake(**_kwargs):
+        """Fake MCP tool."""
+        return response if response is not None else {"ok": True}
+
+    return StructuredTool.from_function(
+        coroutine=fake,
+        name=name,
+        description=f"Fake {name}",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -101,16 +110,87 @@ async def test_load_live_issue_tools_filters_to_allowed_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LIIS_TOKEN", "tok")
-    lark_context = _FakeTool("get_lark_thread_context")
-    code_search = _FakeTool("search_code")
-    other_tool = _FakeTool("delete_production_data")
+    lark_context = _fake_tool("get_lark_thread_context")
+    code_search = _fake_tool("search_code")
+    other_tool = _fake_tool("delete_production_data")
 
     with patch.object(
         live_issue_mcp,
         "_build_mcp_tools",
         AsyncMock(return_value=[other_tool, lark_context, code_search]),
     ):
-        assert await live_issue_mcp.load_live_issue_tools() == [lark_context, code_search]
+        tools = await live_issue_mcp.load_live_issue_tools()
+
+    assert [tool.name for tool in tools] == ["get_lark_thread_context", "search_code"]
+
+
+@pytest.mark.asyncio
+async def test_load_live_issue_tools_redacts_sensitive_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIIS_TOKEN", "tok")
+    aws_tool = _fake_tool(
+        "list_aws_resources",
+        {
+            "Environment": {
+                "Variables": {
+                    "MONGO_URI": "mongodb+srv://user:pass@example/db",
+                    "ROUTE_API_KEY": "secret-key",
+                    "SAFE_NAME": "still-redacted-in-environment",
+                }
+            },
+            "message": "Bearer abc.def.ghi https://open.larksuite.com/open-apis/bot/v2/hook/00000000-0000-0000-0000-000000000000 sk-abcdefghijklmnopqrstuvwx",
+        },
+    )
+
+    with patch.object(
+        live_issue_mcp,
+        "_build_mcp_tools",
+        AsyncMock(return_value=[aws_tool]),
+    ):
+        tools = await live_issue_mcp.load_live_issue_tools()
+
+    result = await tools[0].ainvoke({})
+
+    assert result["Environment"]["Variables"] == {
+        "MONGO_URI": "<redacted>",
+        "ROUTE_API_KEY": "<redacted>",
+        "SAFE_NAME": "<redacted>",
+    }
+    assert "mongodb+srv://" not in result["message"]
+    assert "sk-abcdefghijklmnopqrstuvwx" not in result["message"]
+    assert "Bearer <redacted>" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_load_live_issue_tools_redacts_json_text_content_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LIIS_TOKEN", "tok")
+    aws_tool = _fake_tool(
+        "list_aws_resources",
+        [
+            {
+                "type": "text",
+                "text": '{"Environment":{"Variables":{"ROUTE_API_KEY":"secret","SAFE_NAME":"secret"}}}',
+            }
+        ],
+    )
+
+    with patch.object(
+        live_issue_mcp,
+        "_build_mcp_tools",
+        AsyncMock(return_value=[aws_tool]),
+    ):
+        tools = await live_issue_mcp.load_live_issue_tools()
+
+    result = await tools[0].ainvoke({})
+    text_payload = json.loads(result[0]["text"])
+
+    assert text_payload["Environment"]["Variables"] == {
+        "ROUTE_API_KEY": "<redacted>",
+        "SAFE_NAME": "<redacted>",
+    }
 
 
 @pytest.mark.asyncio
@@ -209,4 +289,4 @@ async def test_get_agent_passes_live_issue_prompt_state() -> None:
         return bool(prompt.call_args.kwargs["live_issue_enabled"])
 
     assert await run_with_live_issue_tools([]) is False
-    assert await run_with_live_issue_tools([_FakeTool("get_lark_thread_context")]) is True
+    assert await run_with_live_issue_tools([_fake_tool("get_lark_thread_context")]) is True

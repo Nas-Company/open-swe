@@ -7,10 +7,13 @@ LangGraph server process. The sandbox never holds LIIS credentials.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from langchain_core.tools import BaseTool
@@ -63,6 +66,28 @@ _ALLOWED_TOOL_NAMES = frozenset(
         "list_admin_portal_records",
         "get_admin_portal_record",
     }
+)
+_SENSITIVE_KEY_RE = re.compile(
+    r"(^|[_-])(api[_-]?key|auth|authorization|credential|password|secret|token)([_-]|$)",
+    re.IGNORECASE,
+)
+_SENSITIVE_EXACT_KEYS = frozenset(
+    {
+        "mongo_uri",
+        "mongodb_uri",
+        "database_url",
+        "connection_string",
+        "private_key",
+    }
+)
+_SECRET_STRING_PATTERNS = (
+    re.compile(r"mongodb(?:\+srv)?://[^\s\"']+", re.IGNORECASE),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
+    re.compile(
+        r"https://open\.larksuite\.com/open-apis/bot/v2/hook/[A-Za-z0-9-]+",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
 )
 
 
@@ -136,6 +161,70 @@ async def _build_mcp_tools(config: LiveIssueMCPConfig) -> list[BaseTool]:
     return await client.get_tools()
 
 
+def _redact_string(value: str) -> str:
+    redacted = value
+    for pattern in _SECRET_STRING_PATTERNS:
+        if pattern.pattern.startswith("(Bearer"):
+            redacted = pattern.sub(r"\1<redacted>", redacted)
+        else:
+            redacted = pattern.sub("<redacted>", redacted)
+    return redacted
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    return normalized in _SENSITIVE_EXACT_KEYS or bool(_SENSITIVE_KEY_RE.search(normalized))
+
+
+def _redact_tool_result(value: Any, *, key: str | None = None) -> Any:
+    if key and _is_sensitive_key(key):
+        return "<redacted>"
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                pass
+            else:
+                return json.dumps(_redact_tool_result(parsed), ensure_ascii=False)
+        return _redact_string(value)
+    if isinstance(value, list):
+        return [_redact_tool_result(item) for item in value]
+    if isinstance(value, dict):
+        if key == "Environment" and isinstance(value.get("Variables"), dict):
+            return {
+                **value,
+                "Variables": dict.fromkeys(value["Variables"], "<redacted>"),
+            }
+        return {
+            item_key: _redact_tool_result(item_value, key=str(item_key))
+            for item_key, item_value in value.items()
+        }
+    return value
+
+
+class _RedactingLiveIssueMCPTool(BaseTool):
+    wrapped_tool: BaseTool
+
+    def _run(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("LIIS MCP tools must be called asynchronously")
+
+    async def _arun(self, *args: Any, **kwargs: Any) -> Any:
+        result = await self.wrapped_tool.ainvoke(args[0] if args else kwargs)
+        return _redact_tool_result(result)
+
+
+def _redacting_tool(tool: BaseTool) -> BaseTool:
+    return _RedactingLiveIssueMCPTool(
+        name=tool.name,
+        description=tool.description,
+        args_schema=tool.args_schema,
+        response_format="content",
+        wrapped_tool=tool,
+    )
+
+
 async def load_live_issue_tools() -> list[BaseTool]:
     """Return allowed LIIS MCP tools when configured, else ``[]``."""
     config = load_live_issue_mcp_config()
@@ -146,7 +235,7 @@ async def load_live_issue_tools() -> list[BaseTool]:
     except Exception:  # noqa: BLE001
         logger.warning("Failed to load LIIS MCP tools", exc_info=True)
         return []
-    allowed_tools = [tool for tool in tools if tool.name in _ALLOWED_TOOL_NAMES]
+    allowed_tools = [_redacting_tool(tool) for tool in tools if tool.name in _ALLOWED_TOOL_NAMES]
     logger.info(
         "Loaded %d LIIS MCP tool(s), exposing %d allowed tool(s)",
         len(tools),
