@@ -13,7 +13,7 @@ Open SWE runs as two deployed pieces:
    - LangGraph backend URL: `https://nascompany-open-swe-5786464fff6d52fdb4f32c80d541067d.aws.us.langgraph.app`
    - Deployment ID: `fcbdc143-a1ac-4eb0-a8d0-bedbcc49e3ed`
    - Defined by `langgraph.json`
-   - Serves the graphs: `agent`, `reviewer`, `analyzer`, `scheduler`
+   - Serves the graphs: `agent`, `reviewer`, `analyzer`, `chat`, `scheduler`
    - Serves the FastAPI app: `agent.webapp:app`
    - Owns `/dashboard/api/*`, `/webhooks/*`, `/health`, and graph run execution
 
@@ -44,10 +44,11 @@ Vercel frontend.
 Last verified successful backend deployment:
 
 ```text
-Date: 2026-06-10
-Revision: 36342154-2bfc-4213-9662-8d643ca0d72e
-Commit: 5b6b2334376f463e27e4e1fc23916653cab58fbd
-Verification: /info host_revision_id matched the revision, /health returned healthy
+Date: 2026-07-11
+Revision: f01ad801-4453-4335-93af-e98348b8f450
+Commit: f84df52b4cede1e43ae04c36ff2cd38fb9d20d5b
+Verification: /info host_revision_id matched the revision, /health returned healthy,
+and a production agent run executed successfully in the nascompany Modal workspace
 ```
 
 ## Backend Environment
@@ -127,6 +128,24 @@ ALLOWED_GITHUB_ORGS=Nas-Company
 DEFAULT_REPO_OWNER=Nas-Company
 DEFAULT_REPO_NAME=open-swe
 ```
+
+Modal ownership:
+
+```text
+Workspace: nascompany
+Environment: main
+App: open-swe
+Workspace owners: chux@nas.com, techshare@nas.io
+```
+
+Production originally used a Modal token and `open-swe` app from the personal
+`chux` workspace. On 2026-07-11, a workspace-scoped token and app were created in
+the shareable `nascompany` workspace, the LangGraph deployment secrets were
+rotated, and revision `f01ad801-4453-4335-93af-e98348b8f450` became active. A
+production `agent` run then created sandbox `sb-WI8eOU2bJZuvDh9bevP0cM` and
+successfully executed a command. The legacy personal app remains deployed but
+had no active tasks at verification time; do not delete it until its token and
+rollback value have been reviewed explicitly.
 
 Because production uses Modal as the command sandbox provider, LangSmith sandbox
 snapshot variables may be empty. If `SANDBOX_TYPE` changes back to `langsmith`,
