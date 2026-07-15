@@ -319,6 +319,50 @@ asyncio.run(main())
 PY
 ```
 
+## Bundled NAS Skills
+
+Executable agent runs materialize the version-controlled files under
+`agent/nas_skills/` into `<sandbox-work-dir>/.open-swe/skills/` before the main
+DeepAgents graph is assembled. The sandbox backend file API performs the upload;
+no deployment credential is copied into the sandbox.
+
+The initial bundle contains `product-live-issue-debugger`. Its production
+evidence paths are restricted to the LIIS tools that survive the explicit
+allowlist in `agent/integrations/live_issue_mcp.py`. If skill materialization
+fails, the agent still starts but does not register the missing skill source.
+
+Safe staging verification:
+
+1. Confirm `/health` and `/info` return successful status.
+2. Start a synthetic agent thread with no customer identifiers.
+3. Ask the agent to list skill names and LIIS tool names without invoking tools.
+4. Confirm `product-live-issue-debugger` and the expected 26 LIIS tool names.
+5. Ask for a synthetic Product Live Issue report and confirm the seven mandatory
+   headings without using production evidence.
+
+Do not print skill contents containing incident evidence, authorization headers,
+environment values, or raw MCP results during a deployment smoke test.
+
+## LangBot Integration
+
+The company `langbot` fork can route an existing Lark pipeline to this deployment
+with its `open-swe-api` runner. Configure the runner in LangBot, not in Open SWE:
+
+| Field | Value |
+| --- | --- |
+| Base URL | This LangGraph deployment URL |
+| API key | Dedicated LangSmith service key stored in the LangBot deployment |
+| Assistant ID | `agent` |
+| Timeout | `900` seconds unless the environment requires a stricter limit |
+| Model/effort | Empty to use Open SWE team defaults, or an allowed deployment model override |
+
+LangBot sends the key as `X-Api-Key`, creates the conversation thread with
+`if_exists=do_nothing`, and streams `values` events from
+`/threads/<thread-id>/runs/stream`. Lark identifiers are forwarded as identifiers
+only so the Open SWE agent can request bounded thread/image evidence through LIIS.
+The key, raw LIIS results, tool calls, and internal graph state must never be
+rendered into Lark.
+
 Useful thread metadata keys:
 
 ```text
