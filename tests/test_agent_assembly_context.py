@@ -34,7 +34,9 @@ def _base_config() -> RunnableConfig:
     }
 
 
-async def _capture_create_deep_agent_kwargs() -> dict[str, object]:
+async def _capture_create_deep_agent_kwargs(
+    *, skill_error: Exception | None = None
+) -> dict[str, object]:
     captured: dict[str, object] = {}
 
     def fake_create_deep_agent(**kwargs: object) -> _DummyAgent:
@@ -67,6 +69,13 @@ async def _capture_create_deep_agent_kwargs() -> dict[str, object]:
         patch("agent.server.fallback_model_id_for", return_value=None),
         patch("agent.server.make_model", side_effect=[MagicMock(), MagicMock()]),
         patch("agent.server.construct_system_prompt", return_value="prompt"),
+        patch(
+            "agent.server.materialize_nas_skills",
+            new_callable=AsyncMock,
+            return_value=["/workspace/.open-swe/skills/"],
+            side_effect=skill_error,
+            create=True,
+        ),
         patch("agent.server.create_deep_agent", side_effect=fake_create_deep_agent),
     ):
         await get_agent(_base_config())
@@ -101,3 +110,17 @@ async def test_agent_keeps_message_queue_and_step_limit_middleware() -> None:
     present = {type(m).__name__ for m in middleware}
     assert "check_message_queue_before_model" in present
     assert "notify_step_limit_reached" in present
+
+
+@pytest.mark.asyncio
+async def test_agent_registers_materialized_nas_skills() -> None:
+    captured = await _capture_create_deep_agent_kwargs()
+
+    assert captured["skills"] == ["/workspace/.open-swe/skills/"]
+
+
+@pytest.mark.asyncio
+async def test_agent_still_assembles_when_nas_skill_materialization_fails() -> None:
+    captured = await _capture_create_deep_agent_kwargs(skill_error=RuntimeError("upload failed"))
+
+    assert captured["skills"] is None
