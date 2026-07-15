@@ -96,4 +96,3 @@ Do not include raw logs, credentials, authorization headers, unnecessary PII, sp
 - The hypothesis is not falsifiable or the first failing layer is not proven.
 - A code edit would occur in a dirty active checkout or against the wrong base branch.
 - Verification cannot recheck the original invariant.
-

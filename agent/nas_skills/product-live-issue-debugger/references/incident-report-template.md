@@ -57,4 +57,3 @@ Write a concise standalone draft containing:
 5. Verification/PR status and next step
 
 Draft only. Never send it automatically. Do not include raw logs, secrets, credentials, unnecessary PII, speculative certainty, or internal debugging narration.
-
