@@ -41,7 +41,7 @@ def build_github_issue_prompt(
         f"## Description:\n{formatted_body}\n"
         f"{comments_text}\n\n"
         "Please analyze this issue and implement the necessary changes. "
-        "When you need to communicate on GitHub, use `GH_TOKEN=dummy gh issue comment` "
+        'When you need to communicate on GitHub, use `GH_TOKEN="${GH_TOKEN:-dummy}" gh issue comment` '
         "with the issue number."
     )
 

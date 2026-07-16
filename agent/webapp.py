@@ -1714,7 +1714,12 @@ async def _get_or_resolve_thread_github_token(thread_id: str, email: str) -> str
     if is_bot_token_only_mode():
         bot_token, expires_at = await get_github_app_installation_token_with_expiry()
         if bot_token:
-            cache_github_token_for_thread(thread_id, bot_token, expires_at=expires_at)
+            cache_github_token_for_thread(
+                thread_id,
+                bot_token,
+                expires_at=expires_at,
+                source="app",
+            )
             return bot_token
         logger.warning("Bot-token-only mode but GitHub App token unavailable")
         return None

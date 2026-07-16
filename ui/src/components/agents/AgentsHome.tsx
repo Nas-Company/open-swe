@@ -2,7 +2,7 @@ import { useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "@tanstack/react-router"
 
-import type { ImageChunk } from "@/lib/agents/types"
+import type { FileChunk, ImageChunk } from "@/lib/agents/types"
 import type { CreateAgentThreadVariables } from "@/lib/agents/queries"
 import type { ModelSelection } from "@/lib/agents/provider/useModelOptions"
 import { AgentPromptBar } from "@/components/agents/AgentPromptBar"
@@ -11,6 +11,7 @@ import { Logo } from "@/components/agents/ported/Logo"
 import {
   agentThreadKeys,
   invalidateAgentThreadLists,
+  optimisticThread,
   seedAgentThreadLists,
 } from "@/lib/agents/queries"
 import { agentsApi } from "@/lib/agents/api"
@@ -41,7 +42,11 @@ export function AgentsHome() {
       ? (profileQuery.data?.default_repo ?? null)
       : repoOverride
 
-  const handleSubmit = async (prompt: string, images: Array<ImageChunk>) => {
+  const handleSubmit = async (
+    prompt: string,
+    images: Array<ImageChunk>,
+    files: Array<FileChunk>
+  ) => {
     void requestNotificationPermission().then((perm) => {
       if (perm === "granted") setNotificationsPref(true)
     })
@@ -49,6 +54,7 @@ export function AgentsHome() {
     const draft: CreateAgentThreadVariables = {
       prompt,
       images,
+      files,
       repo,
       repo_explicitly_none: repoOverride === null,
       model_id: activeSelection?.modelId ?? null,
@@ -59,18 +65,27 @@ export function AgentsHome() {
       const thread = await agentsApi.createThreadRun({
         content: draft.prompt,
         images: draft.images,
+        files: draft.files,
         repo: draft.repo,
         repo_explicitly_none: draft.repo_explicitly_none,
         model_id: draft.model_id,
         effort: draft.effort,
         plan_mode: draft.plan_mode,
       })
-      queryClient.setQueryData(agentThreadKeys.detail(thread.id), thread)
-      seedAgentThreadLists(queryClient, thread)
+      const visibleThread = {
+        ...thread,
+        messages: optimisticThread(thread.id, draft).messages,
+      }
+      queryClient.setQueryData(agentThreadKeys.detail(thread.id), visibleThread)
+      seedAgentThreadLists(queryClient, visibleThread)
       invalidateAgentThreadLists(queryClient)
-      void navigate({ to: "/agents/$threadId", params: { threadId: thread.id } })
-    } catch {
+      void navigate({
+        to: "/agents/$threadId",
+        params: { threadId: thread.id },
+      })
+    } catch (error) {
       setSubmitting(false)
+      throw error
     }
   }
 

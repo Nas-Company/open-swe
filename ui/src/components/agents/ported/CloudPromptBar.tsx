@@ -1,9 +1,9 @@
 import {
   ArrowUp,
   ChevronDown,
-  ImagePlus,
   LoaderCircle,
   Map as MapIcon,
+  Paperclip,
   X,
 } from "lucide-react"
 import { StopIcon } from "@phosphor-icons/react"
@@ -20,11 +20,27 @@ import {
 } from "react"
 
 import type { ModelOption } from "@/lib/api"
-import type { ImageChunk } from "@/lib/agents/types"
+import type { FileChunk, ImageChunk } from "@/lib/agents/types"
 import type { ModelSelection } from "@/lib/agents/provider/useModelOptions"
+import { FileAttachmentPill } from "@/components/agents/FileAttachmentPill"
 import { RepoSelector } from "@/components/agents/RepoSelector"
 import { useIsInAgentThreadStream } from "@/lib/agents/provider/useIsInAgentThreadStream"
-import { agentThreadKeys, invalidateAgentThreadLists } from "@/lib/agents/queries"
+import {
+  agentThreadKeys,
+  invalidateAgentThreadLists,
+} from "@/lib/agents/queries"
+import {
+  MAX_ATTACHMENT_ENCODED_BYTES,
+  MAX_TEXT_FILE_BYTES,
+  MAX_TEXT_FILE_COUNT,
+  MAX_TEXT_FILE_TOTAL_BYTES,
+  TEXT_FILE_ACCEPT,
+  attachmentEncodedBytes,
+  canReserveAttachmentEncodedBytes,
+  fileChunkByteLength,
+  fileToTextFileChunk,
+  isSupportedTextFile,
+} from "@/lib/agents/fileAttachments"
 import { formatModelSelection } from "@/lib/agents/provider/useModelOptions"
 import { IconButton } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -37,7 +53,11 @@ interface SubmitButtonProps {
   onSubmit: () => void
 }
 
-function PlainSubmitButton({ canSubmit, submitting, onSubmit }: SubmitButtonProps) {
+function PlainSubmitButton({
+  canSubmit,
+  submitting,
+  onSubmit,
+}: SubmitButtonProps) {
   return (
     <IconButton
       type="button"
@@ -112,13 +132,18 @@ const SUPPORTED_IMAGE_TYPES = new Set([
   "image/gif",
   "image/webp",
 ])
+const ATTACHMENT_ACCEPT = [...SUPPORTED_IMAGE_TYPES, TEXT_FILE_ACCEPT].join(",")
 
 export interface CloudPromptBarProps {
   placeholder?: string
   compact?: boolean
   disabled?: boolean
   busy?: boolean
-  onSubmit?: (value: string, images: Array<ImageChunk>) => void | Promise<void>
+  onSubmit?: (
+    value: string,
+    images: Array<ImageChunk>,
+    files: Array<FileChunk>
+  ) => void | Promise<void>
   models?: Array<ModelOption>
   selection?: ModelSelection | null
   onSelectionChange?: (next: ModelSelection) => void
@@ -144,11 +169,11 @@ function fileToImageChunk(file: File): Promise<ImageChunk | null> {
       resolve(
         base64
           ? {
-            kind: "image",
-            base64,
-            mimeType: file.type,
-            fileName: file.name,
-          }
+              kind: "image",
+              base64,
+              mimeType: file.type,
+              fileName: file.name,
+            }
           : null
       )
     }
@@ -175,9 +200,15 @@ export const CloudPromptBar = memo(function CloudPromptBarComponent({
 }: CloudPromptBarProps) {
   const [value, setValue] = useState("")
   const [pendingImages, setPendingImages] = useState<Array<ImageChunk>>([])
+  const [pendingFiles, setPendingFiles] = useState<Array<FileChunk>>([])
+  const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const [isDragOver, setIsDragOver] = useState(false)
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const pendingImagesRef = useRef<Array<ImageChunk>>([])
+  const pendingFilesRef = useRef<Array<FileChunk>>([])
+  const attachmentQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const attachmentFailureVersionRef = useRef(0)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const dragDepthRef = useRef(0)
@@ -186,6 +217,24 @@ export const CloudPromptBar = memo(function CloudPromptBarComponent({
   // click, or two rapid Enters) before React re-renders. Scoped to the send
   // request only — never the run lifecycle.
   const submittingRef = useRef(false)
+
+  const updatePendingImages = useCallback(
+    (update: (current: Array<ImageChunk>) => Array<ImageChunk>) => {
+      const next = update(pendingImagesRef.current)
+      pendingImagesRef.current = next
+      setPendingImages(next)
+    },
+    []
+  )
+
+  const updatePendingFiles = useCallback(
+    (update: (current: Array<FileChunk>) => Array<FileChunk>) => {
+      const next = update(pendingFilesRef.current)
+      pendingFilesRef.current = next
+      setPendingFiles(next)
+    },
+    []
+  )
 
   const combos = useMemo<Array<ModelSelection>>(() => {
     const list: Array<ModelSelection> = []
@@ -201,36 +250,72 @@ export const CloudPromptBar = memo(function CloudPromptBarComponent({
 
   const selectedModelSupportsImages = useMemo(() => {
     if (!selection || pendingImages.length === 0) return true
-    return models.some(
-      (m) => m.id === selection.modelId && m.supports_images
-    )
+    return models.some((m) => m.id === selection.modelId && m.supports_images)
   }, [selection, pendingImages.length, models])
 
   const canSubmit =
     !disabled &&
     !isSubmitting &&
     selectedModelSupportsImages &&
-    (value.trim().length > 0 || pendingImages.length > 0)
+    (value.trim().length > 0 ||
+      pendingImages.length > 0 ||
+      pendingFiles.length > 0)
 
   const handleSubmit = useCallback(async () => {
     if (submittingRef.current || disabled) return
     const trimmed = value.trim()
-    if (trimmed.length === 0 && pendingImages.length === 0) return
+    if (
+      trimmed.length === 0 &&
+      pendingImages.length === 0 &&
+      pendingFiles.length === 0
+    ) {
+      return
+    }
 
-    const images = pendingImages
     submittingRef.current = true
     setIsSubmitting(true)
-    setValue("")
-    setPendingImages([])
     try {
-      await onSubmit?.(trimmed, images)
+      const attachmentFailureVersion = attachmentFailureVersionRef.current
+      await attachmentQueueRef.current
+      if (attachmentFailureVersionRef.current !== attachmentFailureVersion) {
+        return
+      }
+      const images = pendingImagesRef.current
+      const files = pendingFilesRef.current
+      if (trimmed.length === 0 && images.length === 0 && files.length === 0) {
+        return
+      }
+      if (
+        selection &&
+        images.length > 0 &&
+        !models.some(
+          (model) => model.id === selection.modelId && model.supports_images
+        )
+      ) {
+        return
+      }
+      await onSubmit?.(trimmed, images, files)
+      setValue("")
+      updatePendingImages(() => [])
+      updatePendingFiles(() => [])
+      setAttachmentError(null)
     } catch {
       // Caller surfaces send errors (e.g. via react-query mutation state).
     } finally {
       submittingRef.current = false
       setIsSubmitting(false)
     }
-  }, [disabled, onSubmit, pendingImages, value])
+  }, [
+    disabled,
+    models,
+    onSubmit,
+    pendingFiles.length,
+    pendingImages.length,
+    selection,
+    updatePendingFiles,
+    updatePendingImages,
+    value,
+  ])
 
   useLayoutEffect(() => {
     const el = inputRef.current
@@ -257,18 +342,160 @@ export const CloudPromptBar = memo(function CloudPromptBarComponent({
     return () => document.removeEventListener("mousedown", handleClickOutside)
   }, [])
 
-  const addFiles = useCallback(async (files: FileList | Array<File>) => {
-    const nextImages = await Promise.all(
-      Array.from(files).map(fileToImageChunk)
-    )
-    const validImages = nextImages.filter(
-      (image): image is ImageChunk => image !== null
-    )
-    if (validImages.length === 0) return
-    setPendingImages((prev) =>
-      [...prev, ...validImages].slice(0, MAX_IMAGE_COUNT)
-    )
-  }, [])
+  const addFiles = useCallback(
+    (files: FileList | Array<File>) => {
+      if (disabled || submittingRef.current) return Promise.resolve()
+      setAttachmentError(null)
+      const incoming = Array.from(files)
+      const processBatch = async () => {
+        const currentImages = pendingImagesRef.current
+        const currentFiles = pendingFilesRef.current
+        const acceptedImages: Array<ImageChunk> = []
+        const acceptedFiles: Array<FileChunk> = []
+        const errors: Array<string> = []
+        const addError = (message: string) => {
+          if (!errors.includes(message)) errors.push(message)
+        }
+        let imageCount = currentImages.length
+        let textFileCount = currentFiles.length
+        let encodedBytes = attachmentEncodedBytes([
+          ...currentImages,
+          ...currentFiles,
+        ])
+        let totalTextBytes = currentFiles.reduce(
+          (total, file) => total + fileChunkByteLength(file),
+          0
+        )
+
+        for (const file of incoming) {
+          if (SUPPORTED_IMAGE_TYPES.has(file.type)) {
+            if (imageCount >= MAX_IMAGE_COUNT) {
+              addError("You can attach up to 5 images.")
+              continue
+            }
+            if (file.size > MAX_IMAGE_BYTES) {
+              addError(
+                "Images must be PNG, JPEG, GIF, or WebP and no larger than 10 MiB."
+              )
+              continue
+            }
+            const estimatedEncodedBytes = Math.ceil(file.size / 3) * 4
+            if (
+              !canReserveAttachmentEncodedBytes(
+                encodedBytes,
+                estimatedEncodedBytes
+              )
+            ) {
+              addError(
+                `Attachments cannot exceed ${MAX_ATTACHMENT_ENCODED_BYTES / (1024 * 1024)} MiB after encoding.`
+              )
+              continue
+            }
+            const image = await fileToImageChunk(file)
+            if (!image) {
+              addError(
+                "Images must be PNG, JPEG, GIF, or WebP and no larger than 10 MiB."
+              )
+              continue
+            }
+            if (
+              !canReserveAttachmentEncodedBytes(
+                encodedBytes,
+                image.base64.length
+              )
+            ) {
+              addError(
+                `Attachments cannot exceed ${MAX_ATTACHMENT_ENCODED_BYTES / (1024 * 1024)} MiB after encoding.`
+              )
+              continue
+            }
+            acceptedImages.push(image)
+            imageCount += 1
+            encodedBytes += Math.max(image.base64.length, estimatedEncodedBytes)
+            continue
+          }
+
+          if (!isSupportedTextFile(file)) {
+            addError(
+              "Attach images or UTF-8 .md, .html, .json, .csv, and .txt files."
+            )
+            continue
+          }
+          if (textFileCount >= MAX_TEXT_FILE_COUNT) {
+            addError("You can attach up to 5 text files.")
+            continue
+          }
+          if (file.size === 0) {
+            addError(`${file.name} is empty.`)
+            continue
+          }
+          if (file.size > MAX_TEXT_FILE_BYTES) {
+            addError(`${file.name} exceeds the 2 MiB limit.`)
+            continue
+          }
+          if (totalTextBytes + file.size > MAX_TEXT_FILE_TOTAL_BYTES) {
+            addError("Text attachments cannot exceed 10 MiB in total.")
+            continue
+          }
+          const estimatedEncodedBytes = Math.ceil(file.size / 3) * 4
+          if (
+            !canReserveAttachmentEncodedBytes(
+              encodedBytes,
+              estimatedEncodedBytes
+            )
+          ) {
+            addError(
+              `Attachments cannot exceed ${MAX_ATTACHMENT_ENCODED_BYTES / (1024 * 1024)} MiB after encoding.`
+            )
+            continue
+          }
+          const result = await fileToTextFileChunk(file)
+          if (!result.ok) {
+            addError(result.message)
+            continue
+          }
+          if (
+            !canReserveAttachmentEncodedBytes(
+              encodedBytes,
+              result.file.base64.length
+            )
+          ) {
+            addError(
+              `Attachments cannot exceed ${MAX_ATTACHMENT_ENCODED_BYTES / (1024 * 1024)} MiB after encoding.`
+            )
+            continue
+          }
+          acceptedFiles.push(result.file)
+          textFileCount += 1
+          totalTextBytes += fileChunkByteLength(result.file)
+          encodedBytes += Math.max(
+            result.file.base64.length,
+            estimatedEncodedBytes
+          )
+        }
+
+        if (acceptedImages.length > 0) {
+          updatePendingImages((prev) => [...prev, ...acceptedImages])
+        }
+        if (acceptedFiles.length > 0) {
+          updatePendingFiles((prev) => [...prev, ...acceptedFiles])
+        }
+        if (errors.length > 0) {
+          attachmentFailureVersionRef.current += 1
+          setAttachmentError(errors[0] ?? null)
+        }
+      }
+
+      const processing = attachmentQueueRef.current.then(processBatch)
+      const settled = processing.catch(() => {
+        attachmentFailureVersionRef.current += 1
+        setAttachmentError("The selected attachments could not be read.")
+      })
+      attachmentQueueRef.current = settled
+      return settled
+    },
+    [disabled, updatePendingFiles, updatePendingImages]
+  )
 
   const handleFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -317,7 +544,12 @@ export const CloudPromptBar = memo(function CloudPromptBarComponent({
       for (const item of Array.from(items)) {
         if (item.kind === "file") {
           const file = item.getAsFile()
-          if (file && SUPPORTED_IMAGE_TYPES.has(file.type)) files.push(file)
+          if (
+            file &&
+            (SUPPORTED_IMAGE_TYPES.has(file.type) || isSupportedTextFile(file))
+          ) {
+            files.push(file)
+          }
         }
       }
       if (files.length === 0) return
@@ -370,7 +602,7 @@ export const CloudPromptBar = memo(function CloudPromptBarComponent({
         {isDragOver && (
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-[var(--ui-surface)]/80 backdrop-blur-sm">
             <span className="rounded-md bg-[var(--ui-panel-2)] px-3 py-1.5 text-xs font-medium text-[color:var(--ui-accent)]">
-              Drop images here
+              Drop images or text files here
             </span>
           </div>
         )}
@@ -378,8 +610,9 @@ export const CloudPromptBar = memo(function CloudPromptBarComponent({
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/png,image/jpeg,image/gif,image/webp"
+          accept={ATTACHMENT_ACCEPT}
           multiple
+          disabled={disabled || isSubmitting}
           className="hidden"
           onChange={handleFileChange}
         />
@@ -400,24 +633,50 @@ export const CloudPromptBar = memo(function CloudPromptBarComponent({
                   type="button"
                   aria-label="Remove image"
                   onClick={() =>
-                    setPendingImages((prev) =>
+                    updatePendingImages((prev) =>
                       prev.filter((_, i) => i !== index)
                     )
                   }
-                  className="absolute -top-1.5 -right-1.5 flex size-5 items-center justify-center rounded-full border border-[var(--ui-border)] bg-[var(--ui-panel-2)] text-[color:var(--ui-text-muted)] opacity-0 shadow-sm transition-opacity group-hover:opacity-100 hover:text-[color:var(--ui-text)]"
+                  className="absolute -top-2 -right-2 flex size-7 items-center justify-center rounded-full border border-[var(--ui-border)] bg-[var(--ui-panel-2)] text-[color:var(--ui-text-muted)] shadow-sm transition-colors hover:text-[color:var(--ui-text)] focus-visible:ring-2 focus-visible:ring-[var(--ui-accent)] focus-visible:outline-none"
                 >
-                  <X className="size-3" />
+                  <X className="size-3.5" />
                 </button>
               </div>
             ))}
           </div>
         )}
 
+        {pendingFiles.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {pendingFiles.map((file, index) => (
+              <FileAttachmentPill
+                key={`${file.fileName}-${index}`}
+                fileName={file.fileName}
+                mimeType={file.mimeType}
+                onRemove={() =>
+                  updatePendingFiles((prev) =>
+                    prev.filter((_, fileIndex) => fileIndex !== index)
+                  )
+                }
+              />
+            ))}
+          </div>
+        )}
+
+        {attachmentError && (
+          <p
+            role="status"
+            className="mb-2 text-xs text-[color:var(--ui-text-muted)]"
+          >
+            {attachmentError}
+          </p>
+        )}
+
         {!selectedModelSupportsImages && (
           <div className="mb-2 rounded-md border border-[var(--ui-border)] bg-[var(--ui-panel-2)] px-3 py-1.5 text-xs text-[color:var(--ui-text-muted)]">
-            The selected model does not support image input. Remove the
-            image{pendingImages.length > 1 ? "s" : ""} or switch to a
-            vision-enabled model to send.
+            The selected model does not support image input. Remove the image
+            {pendingImages.length > 1 ? "s" : ""} or switch to a vision-enabled
+            model to send.
           </div>
         )}
 
@@ -429,7 +688,7 @@ export const CloudPromptBar = memo(function CloudPromptBarComponent({
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           placeholder={busy ? "Send a message to queue next..." : placeholder}
-          disabled={disabled}
+          disabled={disabled || isSubmitting}
           className={cn(
             "w-full min-w-0 resize-none overflow-hidden bg-transparent text-[13px] leading-[1.45] text-[color:var(--ui-text)] outline-none placeholder:text-[color:var(--ui-text-dim)]",
             compact ? "min-h-[36px]" : "min-h-[52px]"
@@ -506,11 +765,17 @@ export const CloudPromptBar = memo(function CloudPromptBarComponent({
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            disabled={disabled || pendingImages.length >= MAX_IMAGE_COUNT}
-            aria-label="Attach images"
+            disabled={
+              disabled ||
+              isSubmitting ||
+              (pendingImages.length >= MAX_IMAGE_COUNT &&
+                pendingFiles.length >= MAX_TEXT_FILE_COUNT)
+            }
+            aria-label="Attach images or text files"
+            title="Attach images or text files"
             className="ml-auto flex size-7 shrink-0 items-center justify-center rounded-full text-[color:var(--ui-text-muted)] transition-colors hover:bg-[var(--ui-panel-2)] hover:text-[color:var(--ui-text)] disabled:cursor-default disabled:opacity-40"
           >
-            <ImagePlus className="size-4" />
+            <Paperclip className="size-4" />
           </button>
 
           <SubmitButton

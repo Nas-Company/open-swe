@@ -4,7 +4,7 @@ from importlib import import_module
 
 from deepagents.backends.protocol import SandboxBackendProtocol
 
-SandboxFactory = Callable[[str | None], SandboxBackendProtocol]
+SandboxFactory = Callable[..., SandboxBackendProtocol]
 
 SANDBOX_FACTORIES: dict[str, tuple[str, str]] = {
     "langsmith": ("agent.integrations.langsmith", "create_langsmith_sandbox"),
@@ -31,6 +31,7 @@ def create_sandbox(
     sandbox_id: str | None = None,
     *,
     snapshot_id: str | None = None,
+    github_token: str | None = None,
 ) -> SandboxBackendProtocol:
     """Create or reconnect to a sandbox using the configured provider.
 
@@ -42,6 +43,8 @@ def create_sandbox(
         snapshot_id: Optional snapshot to boot a new sandbox from. Only the
             langsmith provider honors this; others ignore it. When omitted the
             langsmith provider falls back to DEFAULT_SANDBOX_SNAPSHOT_ID.
+        github_token: Optional short-lived GitHub token. Only the Modal provider
+            receives it; LangSmith continues to use its network proxy.
 
     Returns:
         A sandbox backend implementing SandboxBackendProtocol.
@@ -50,6 +53,8 @@ def create_sandbox(
     factory = _load_sandbox_factory(sandbox_type)
     if sandbox_type == "langsmith" and snapshot_id is not None:
         return factory(sandbox_id, snapshot_id=snapshot_id)
+    if sandbox_type == "modal":
+        return factory(sandbox_id, github_token=github_token)
     return factory(sandbox_id)
 
 
@@ -65,3 +70,7 @@ def validate_sandbox_startup_config() -> None:
         from agent.integrations.langsmith import LangSmithProvider
 
         LangSmithProvider.validate_startup_config()
+    elif sandbox_type == "modal":
+        from agent.integrations.modal import ModalSandboxConfig
+
+        ModalSandboxConfig.from_env()

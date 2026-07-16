@@ -23,6 +23,7 @@ from agent.utils import github_comments, github_token
 @pytest.fixture(autouse=True)
 def _clear_token_cache() -> None:
     github_token._GITHUB_TOKEN_CACHE.clear()
+    github_token._GITHUB_TOKEN_SOURCES.clear()
 
 
 # (a) expired-cache reads -----------------------------------------------------
@@ -63,6 +64,14 @@ def test_get_github_token_returns_fresh_cached_token() -> None:
 def test_get_github_token_returns_cached_token_when_no_expires_at() -> None:
     github_token.cache_github_token_for_thread("tid", "ghp_secret")
     assert github_token.get_github_token({"configurable": {"thread_id": "tid"}}) == "ghp_secret"
+
+
+def test_cached_token_tracks_user_or_app_provenance() -> None:
+    github_token.cache_github_token_for_thread("user", "gho_user")
+    github_token.cache_github_token_for_thread("app", "ghs_app", source="app")
+
+    assert github_token.get_github_token_source_for_thread("user") == "user"
+    assert github_token.get_github_token_source_for_thread("app") == "app"
 
 
 def test_cached_token_expires_after_max_ttl() -> None:
@@ -107,6 +116,7 @@ async def test_invalidate_cached_github_token_clears_cache() -> None:
     token, expires_at = await github_token.get_github_token_from_thread("tid-42")
     assert token is None
     assert expires_at is None
+    assert github_token.get_github_token_source_for_thread("tid-42") is None
 
 
 # (b) 401 on a downstream GitHub call -----------------------------------------

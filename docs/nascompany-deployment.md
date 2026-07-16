@@ -104,6 +104,12 @@ Sandbox:
   MODAL_APP_NAME
   MODAL_TOKEN_ID
   MODAL_TOKEN_SECRET
+  MODAL_SANDBOX_TIMEOUT_SECONDS (optional, default 14400)
+  MODAL_SANDBOX_IDLE_TIMEOUT_SECONDS (optional, default 1800)
+  MODAL_SANDBOX_WORKDIR (optional, default /workspace)
+  MODAL_SANDBOX_CPU (optional, default 2)
+  MODAL_SANDBOX_MEMORY_MIB (optional, default 4096)
+  SANDBOX_CREATION_TIMEOUT_SECONDS (optional; Modal default 900)
 
 Optional integrations:
   LINEAR_API_KEY
@@ -151,6 +157,31 @@ Because production uses Modal as the command sandbox provider, LangSmith sandbox
 snapshot variables may be empty. If `SANDBOX_TYPE` changes back to `langsmith`,
 set `DEFAULT_SANDBOX_SNAPSHOT_ID` and the related snapshot resource settings.
 
+The Modal adapter builds a pinned Playwright/Chromium image with Python 3.12,
+Node, Bun, GitHub CLI, git, and ripgrep. Each thread's selected repository scopes
+a short-lived GitHub App installation token. The token stays in backend memory
+and is exposed only to a one-shot GitHub broker sandbox; the long-lived thread
+sandbox never receives it. Clone/fetch and fixed-SHA push data cross that boundary
+as Git bundles, and every broker is terminated after the command. Package
+installs, builds, tests, and browser renders therefore do not inherit GitHub
+credentials. Dashboard-user GitHub OAuth stays on the trusted server for identity
+and server-side API calls and is never forwarded to either sandbox. A private
+repository must be granted to the GitHub App installation before the broker can
+clone it; missing App access fails closed during sandbox creation.
+
+Every new Modal thread sandbox is also tagged with the configured app name and
+the Modal control-plane app ID. Reconnect verifies the exact sandbox ID through
+an app-ID-scoped lookup before any command or file operation. Sandboxes created
+before this ownership marker was introduced fail closed and are replaced on the
+next run, so their ephemeral `/workspace` contents do not migrate automatically.
+Download any required artifacts from an older thread before deploying this
+change.
+
+Dashboard messages can attach UTF-8 `.md`, `.html`, `.json`, `.csv`, and `.txt`
+files. The limits are five files, 2 MiB per file, and 10 MiB combined. The
+backend validates them, writes them under `/workspace/.open-swe/attachments/`,
+and replaces base64 blocks with exact sandbox paths before the model call.
+
 ## Frontend Environment
 
 Production uses same-origin dashboard API requests. In Vercel,
@@ -192,7 +223,10 @@ Backend:
 3. Confirm the new revision builds.
 4. Wait for rollout to reach `DEPLOYED`.
 5. Confirm the deployment active/latest revision points to the new revision.
-6. Confirm the public backend reports the new host revision:
+6. Confirm the public backend reports the new host revision.
+7. For sandbox-runtime changes, run a real production agent smoke test that
+   clones a private repo and checks `bun`, `playwright`, Chromium rendering,
+   screenshot reading, and sandbox reconnect persistence.
 
 ```bash
 curl -sS https://nascompany-open-swe-5786464fff6d52fdb4f32c80d541067d.aws.us.langgraph.app/info

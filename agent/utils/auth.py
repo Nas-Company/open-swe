@@ -14,7 +14,11 @@ from langgraph.graph.state import RunnableConfig
 from langgraph_sdk import get_client
 
 from .github_app import get_github_app_installation_token_with_expiry
-from .github_token import cache_github_token_for_thread, get_github_token_from_thread
+from .github_token import (
+    GitHubTokenSource,
+    cache_github_token_for_thread,
+    get_github_token_from_thread,
+)
 from .http import DEFAULT_HTTP_TIMEOUT
 from .linear import comment_on_linear_issue
 from .slack import post_slack_thread_reply
@@ -288,9 +292,13 @@ async def leave_failure_comment(
 
 
 def _cache_resolved_github_token(
-    thread_id: str, token: str, expires_at: str | None = None
+    thread_id: str,
+    token: str,
+    expires_at: str | None = None,
+    *,
+    source: GitHubTokenSource = "user",
 ) -> tuple[str, str | None]:
-    cache_github_token_for_thread(thread_id, token, expires_at=expires_at)
+    cache_github_token_for_thread(thread_id, token, expires_at=expires_at, source=source)
     return token, expires_at
 
 
@@ -395,7 +403,12 @@ async def _resolve_bot_installation_token(thread_id: str) -> tuple[str, str | No
     logger.info(
         "Using GitHub App installation token for thread %s (bot-token-only mode)", thread_id
     )
-    return _cache_resolved_github_token(thread_id, bot_token, expires_at=expires_at)
+    return _cache_resolved_github_token(
+        thread_id,
+        bot_token,
+        expires_at=expires_at,
+        source="app",
+    )
 
 
 async def resolve_github_token(config: RunnableConfig, thread_id: str) -> tuple[str, str | None]:

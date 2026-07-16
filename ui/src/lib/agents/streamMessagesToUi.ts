@@ -145,7 +145,7 @@ function reasoningText(raw: BaseMessage): string {
   return text.trim();
 }
 
-function imageChunks(content: unknown): Array<Chunk> {
+function attachmentChunks(content: unknown): Array<Chunk> {
   if (!Array.isArray(content)) return [];
 
   const chunks: Array<Chunk> = [];
@@ -153,6 +153,20 @@ function imageChunks(content: unknown): Array<Chunk> {
     if (!item || typeof item !== "object" || Array.isArray(item)) continue;
     const block = item as Record<string, unknown>;
     const type = block.type;
+    if (type === "file") {
+      const data = block.base64 ?? block.data;
+      const mime = block.mime_type ?? block.mimeType;
+      const fileName = block.file_name ?? block.fileName;
+      if (
+        typeof data === "string" && data &&
+        typeof mime === "string" && mime &&
+        typeof fileName === "string" && fileName
+      ) {
+        chunks.push({ kind: "file", base64: data, mimeType: mime, fileName });
+      }
+      continue;
+    }
+
     let base64: string | undefined;
     let mimeType: string | undefined;
 
@@ -355,7 +369,7 @@ export function streamMessagesToUi(
     if (HumanMessage.isInstance(raw)) {
       flushAgentTurn();
       const content = (raw as unknown as { content?: unknown }).content;
-      const chunks = imageChunks(content);
+      const chunks = attachmentChunks(content);
       const text = raw.text.trim();
       if (text) chunks.push({ kind: "text", text });
       if (!chunks.length) return;

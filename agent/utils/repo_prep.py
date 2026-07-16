@@ -2,7 +2,7 @@
 
 The reviewer reviews a single PR, so we clone its repo and check out the PR
 head during agent init -- before the first model call -- instead of asking the
-LLM to narrate ``gh repo clone`` mid-run. Pre-cloning also lets ``SkillsMiddleware``
+LLM to narrate repo setup mid-run. Pre-cloning also lets ``SkillsMiddleware``
 discover the repo's ``.agents/skills`` / ``.claude/skills`` at its one-shot
 ``before_agent`` scan.
 
@@ -29,48 +29,23 @@ DEFAULT_SKILL_DIRS = (".agents/skills", ".claude/skills")
 TRUSTED_SKILLS_DIRNAME = ".review-skills"
 
 
-def _prep_command(
-    work_dir: str,
-    repo_owner: str,
-    repo_name: str,
-    head_sha: str,
-    pr_number: int | None,
-    base_sha: str,
-) -> str:
-    repo_dir = posixpath.join(work_dir, repo_name)
-    q_work_dir = shlex.quote(work_dir)
-    q_repo_dir = shlex.quote(repo_dir)
-    q_full_name = shlex.quote(f"{repo_owner}/{repo_name}")
-    q_repo_name = shlex.quote(repo_name)
-    q_head = shlex.quote(head_sha) if head_sha else ""
+async def _execute(
+    sandbox_backend: SandboxBackendProtocol,
+    command: str,
+) -> object | None:
+    try:
+        return await asyncio.to_thread(
+            sandbox_backend.execute,
+            command,
+            timeout=CLONE_TIMEOUT_SECONDS,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("Review repo prep command failed: %s", command, exc_info=True)
+        return None
 
-    lines = [
-        "set -e",
-        f"if [ -d {q_repo_dir}/.git ]; then",
-        # Tolerate fetch-all failures: the targeted head/base fetches below
-        # are what the checkout actually needs.
-        f"  cd {q_repo_dir} && {{ GH_TOKEN=dummy git fetch --all --quiet || true; }}",
-        "else",
-        f"  cd {q_work_dir} && GH_TOKEN=dummy gh repo clone {q_full_name} && cd {q_repo_name}",
-        "fi",
-    ]
-    if base_sha:
-        q_base = shlex.quote(base_sha)
-        lines.append(f"GH_TOKEN=dummy git fetch origin {q_base} --quiet 2>/dev/null || true")
-    if q_head:
-        # Direct sha fetch covers same-repo PRs; the pull ref covers fork PRs
-        # whose head commit is not reachable from origin's branches.
-        lines.append(f"GH_TOKEN=dummy git fetch origin {q_head} --quiet 2>/dev/null || true")
-        if pr_number is not None:
-            pull_ref = shlex.quote(f"refs/pull/{pr_number}/head")
-            lines.append(f"GH_TOKEN=dummy git fetch origin {pull_ref} --quiet 2>/dev/null || true")
-        # --force: a reused sandbox can have a dirty worktree from a previous
-        # run, which would otherwise block the checkout and silently leave the
-        # tree at the old head. Strict on purpose: a failed checkout must fail
-        # the prep so callers know the tree is NOT at the PR head.
-        lines.append(f"git checkout --force {q_head} --quiet")
-        lines.append(f'[ "$(git rev-parse HEAD)" = {q_head} ]')
-    return "\n".join(lines)
+
+def _succeeded(result: object | None) -> bool:
+    return result is not None and getattr(result, "exit_code", None) in (0, None)
 
 
 async def prepare_review_repo(
@@ -91,25 +66,52 @@ async def prepare_review_repo(
     if not repo_owner or not repo_name:
         return False
 
-    command = _prep_command(work_dir, repo_owner, repo_name, head_sha, pr_number, base_sha)
-    try:
-        result = await asyncio.to_thread(
-            sandbox_backend.execute, command, timeout=CLONE_TIMEOUT_SECONDS
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning("Failed to prep review repo %s/%s", repo_owner, repo_name, exc_info=True)
-        return False
+    repo_dir = posixpath.join(work_dir, repo_name)
+    q_work_dir = shlex.quote(work_dir)
+    q_repo_dir = shlex.quote(repo_dir)
+    q_clone_url = shlex.quote(f"https://github.com/{repo_owner}/{repo_name}.git")
 
-    exit_code = getattr(result, "exit_code", None)
-    if exit_code not in (0, None):
-        logger.warning(
-            "Review repo prep for %s/%s exited %s: %s",
-            repo_owner,
-            repo_name,
-            exit_code,
-            getattr(result, "output", ""),
+    repo_exists = _succeeded(await _execute(sandbox_backend, f"test -d {q_repo_dir}/.git"))
+    if repo_exists:
+        await _execute(
+            sandbox_backend,
+            f'cd {q_repo_dir} && GH_TOKEN="${{GH_TOKEN:-dummy}}" git fetch origin --quiet',
         )
-        return False
+    else:
+        clone_result = await _execute(
+            sandbox_backend,
+            f"cd {q_work_dir} && git clone --no-checkout --quiet {q_clone_url} {q_repo_dir}",
+        )
+        if not _succeeded(clone_result):
+            logger.warning("Failed to clone review repo %s/%s", repo_owner, repo_name)
+            return False
+
+    for ref in filter(None, [base_sha, head_sha]):
+        q_ref = shlex.quote(ref)
+        await _execute(
+            sandbox_backend,
+            f'cd {q_repo_dir} && GH_TOKEN="${{GH_TOKEN:-dummy}}" git fetch origin {q_ref} --quiet',
+        )
+    if head_sha and pr_number is not None:
+        pull_ref = shlex.quote(f"refs/pull/{pr_number}/head")
+        await _execute(
+            sandbox_backend,
+            f'cd {q_repo_dir} && GH_TOKEN="${{GH_TOKEN:-dummy}}" '
+            f"git fetch origin {pull_ref} --quiet",
+        )
+
+    if head_sha:
+        q_head = shlex.quote(head_sha)
+        checkout_result = await _execute(
+            sandbox_backend,
+            f"git -C {q_repo_dir} checkout --force {q_head} --quiet",
+        )
+        if not _succeeded(checkout_result):
+            return False
+        verify_result = await _execute(sandbox_backend, f"git -C {q_repo_dir} rev-parse HEAD")
+        actual_head = str(getattr(verify_result, "output", "") or "").strip()
+        if not _succeeded(verify_result) or actual_head != head_sha:
+            return False
 
     logger.info(
         "Prepped review repo %s/%s at %s (head=%s)",

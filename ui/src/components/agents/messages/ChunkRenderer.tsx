@@ -1,6 +1,7 @@
 import type { Chunk } from "@/lib/agents/types";
 import type { ApprovalCallbacks } from "./types";
 import { CodeBlock } from "@/components/agents/ported/CodeBlock";
+import { FileAttachmentPill } from "@/components/agents/FileAttachmentPill";
 import { Markdown } from "@/components/agents/ported/Markdown";
 import { ToolExecution } from "@/components/agents/ported/ToolExecution";
 
@@ -46,6 +47,13 @@ export function ChunkRenderer({
           src={`data:${chunk.mimeType};base64,${chunk.base64}`}
           alt={chunk.fileName || "image"}
           className="max-w-48 max-h-48 rounded border border-gray-600"
+        />
+      );
+    case "file":
+      return (
+        <FileAttachmentPill
+          fileName={chunk.fileName}
+          mimeType={chunk.mimeType}
         />
       );
   }

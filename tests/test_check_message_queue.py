@@ -10,6 +10,7 @@ from agent.middleware.check_message_queue import (
     _build_blocks_from_payload,
     check_message_queue_before_model,
 )
+from agent.utils.text_file_attachments import validate_text_file_blocks
 
 
 class _QueuedItem:
@@ -115,3 +116,87 @@ async def test_build_blocks_no_model_check_fetches_images() -> None:
     payload: dict[str, Any] = {"text": "see this", "image_urls": []}
     blocks = await _build_blocks_from_payload(payload)
     assert blocks == [{"type": "text", "text": "see this"}]
+
+
+@pytest.mark.asyncio
+async def test_build_blocks_preserves_text_file_blocks() -> None:
+    file_block = {
+        "type": "file",
+        "base64": "aGVsbG8=",
+        "mime_type": "text/plain",
+        "file_name": "notes.txt",
+    }
+
+    blocks = await _build_blocks_from_payload({"text": "read this", "files": [file_block]})
+
+    assert blocks == [{"type": "text", "text": "read this"}, file_block]
+
+
+@pytest.mark.asyncio
+async def test_check_message_queue_injects_file_only_dashboard_payload() -> None:
+    file_block = {
+        "type": "file",
+        "base64": "aGVsbG8=",
+        "mime_type": "text/plain",
+        "file_name": "notes.txt",
+    }
+    store = _FakeStore(
+        {
+            (("queue", "thread-1"), "pending_messages"): {
+                "messages": [{"content": {"files": [file_block], "source": "dashboard"}}]
+            }
+        }
+    )
+
+    with (
+        patch(
+            "agent.middleware.check_message_queue.get_config",
+            return_value={"configurable": {"thread_id": "thread-1"}},
+        ),
+        patch("agent.middleware.check_message_queue.get_store", return_value=store),
+    ):
+        result = await check_message_queue_before_model.abefore_model({}, MagicMock())
+
+    assert result is not None
+    blocks = result["messages"][0]["content"]
+    assert DASHBOARD_HANDOFF_MARKER in blocks[0]["text"]
+    assert blocks[1] == file_block
+
+
+@pytest.mark.asyncio
+async def test_check_message_queue_preserves_each_follow_up_attachment_limit_boundary() -> None:
+    def files(prefix: str) -> list[dict[str, str]]:
+        return [
+            {
+                "type": "file",
+                "base64": "aGVsbG8=",
+                "mime_type": "text/plain",
+                "file_name": f"{prefix}-{index}.txt",
+            }
+            for index in range(5)
+        ]
+
+    store = _FakeStore(
+        {
+            (("queue", "thread-1"), "pending_messages"): {
+                "messages": [
+                    {"content": {"files": files("first"), "source": "dashboard"}},
+                    {"content": {"files": files("second"), "source": "dashboard"}},
+                ]
+            }
+        }
+    )
+
+    with (
+        patch(
+            "agent.middleware.check_message_queue.get_config",
+            return_value={"configurable": {"thread_id": "thread-1"}},
+        ),
+        patch("agent.middleware.check_message_queue.get_store", return_value=store),
+    ):
+        result = await check_message_queue_before_model.abefore_model({}, MagicMock())
+
+    assert result is not None
+    assert len(result["messages"]) == 2
+    for message in result["messages"]:
+        assert len(validate_text_file_blocks(message["content"])) == 5

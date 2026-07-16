@@ -1,16 +1,46 @@
-import { useCallback, useRef } from "react";
-import { StreamProvider } from "@langchain/react";
-import { overrideFetchImplementation } from "@langchain/langgraph-sdk";
-import { useQueryClient } from "@tanstack/react-query";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+} from "react"
+import { StreamProvider } from "@langchain/react"
+import { overrideFetchImplementation } from "@langchain/langgraph-sdk"
+import { useQueryClient } from "@tanstack/react-query"
 
-import { agentsApi } from "./api";
-import { agentThreadKeys, invalidateAgentThreadLists } from "./queries";
-import type { ReactNode } from "react";
+import { agentsApi } from "./api"
+import { agentThreadKeys, invalidateAgentThreadLists } from "./queries"
+import type { ReactNode } from "react"
 
-const AGENT_ASSISTANT_ID = "agent";
+const AGENT_ASSISTANT_ID = "agent"
+const RUN_START_CONFIRMATION_TIMEOUT_MS = 35_000
+
+type RunStartErrorHandler = (error: unknown) => void
+type RunStarter = (onError: RunStartErrorHandler) => Promise<void>
+type ConfirmRunStart = (start: RunStarter) => Promise<void>
+
+interface RunStartWaiter {
+  resolve: () => void
+  reject: RunStartErrorHandler
+}
+
+const AgentRunStartConfirmationContext = createContext<ConfirmRunStart | null>(
+  null
+)
+
+export function useAgentRunStartConfirmation(): ConfirmRunStart {
+  const confirmRunStart = useContext(AgentRunStartConfirmationContext)
+  if (!confirmRunStart) {
+    throw new Error(
+      "useAgentRunStartConfirmation must be used inside AgentThreadStreamProvider"
+    )
+  }
+  return confirmRunStart
+}
 
 const dashboardFetch: typeof fetch = (input, init) =>
-  fetch(input, { ...init, credentials: "include" });
+  fetch(input, { ...init, credentials: "include" })
 
 /**
  * We use the SDK's built-in `sse` transport (via {@link StreamProvider}'s
@@ -23,7 +53,7 @@ const dashboardFetch: typeof fetch = (input, init) =>
  * read with `401 "not authenticated"`. Override the SDK's global fetch so
  * every `Client` read carries the same credentials as the transport.
  */
-overrideFetchImplementation(dashboardFetch);
+overrideFetchImplementation(dashboardFetch)
 
 /**
  * The SDK transport builds request URLs as `new URL(apiUrl + path)`, so
@@ -33,14 +63,14 @@ overrideFetchImplementation(dashboardFetch);
  * same-origin base to an absolute URL using the current origin.
  */
 function toAbsoluteApiUrl(url: string): string {
-  if (/^https?:\/\//.test(url)) return url;
+  if (/^https?:\/\//.test(url)) return url
   if (typeof window !== "undefined") {
-    return `${window.location.origin}${url.startsWith("/") ? "" : "/"}${url}`;
+    return `${window.location.origin}${url.startsWith("/") ? "" : "/"}${url}`
   }
-  return url;
+  return url
 }
 
-const agentStreamApiUrl = toAbsoluteApiUrl(agentsApi.langGraphApiUrl);
+const agentStreamApiUrl = toAbsoluteApiUrl(agentsApi.langGraphApiUrl)
 
 /**
  * One persistent stream for the whole `/agents` subtree, mounted by the
@@ -61,39 +91,96 @@ export function AgentThreadStreamProvider({
    * the `getState` hydrate — so a fresh thread needs no client-minted id and
    * no `getState` 404 round-trip.
    */
-  threadId: string | null;
-  children: ReactNode;
+  threadId: string | null
+  children: ReactNode
 }) {
-  const queryClient = useQueryClient();
+  const queryClient = useQueryClient()
+  const runStartWaitersRef = useRef<Array<RunStartWaiter>>([])
 
   // The SDK captures the lifecycle callbacks once at controller creation, so
   // they must be stable. Read the live thread id from a ref instead of
   // closing over the (changing) prop.
-  const threadIdRef = useRef<string | null>(threadId);
-  threadIdRef.current = threadId;
+  const threadIdRef = useRef<string | null>(threadId)
+  threadIdRef.current = threadId
+
+  const confirmRunStart = useCallback<ConfirmRunStart>((start) => {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false
+      const waiter: RunStartWaiter = {
+        resolve: () => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          runStartWaitersRef.current = runStartWaitersRef.current.filter(
+            (candidate) => candidate !== waiter
+          )
+          resolve()
+        },
+        reject: (error) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          runStartWaitersRef.current = runStartWaitersRef.current.filter(
+            (candidate) => candidate !== waiter
+          )
+          reject(
+            error instanceof Error
+              ? error
+              : new Error("The agent run could not be started")
+          )
+        },
+      }
+
+      runStartWaitersRef.current.push(waiter)
+      const timer = setTimeout(() => {
+        waiter.reject(new Error("Timed out waiting for the agent run to start"))
+      }, RUN_START_CONFIRMATION_TIMEOUT_MS)
+
+      try {
+        void start(waiter.reject).catch(waiter.reject)
+      } catch (error) {
+        waiter.reject(error)
+      }
+    })
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      const waiters = runStartWaitersRef.current
+      runStartWaitersRef.current = []
+      for (const waiter of waiters) {
+        waiter.reject(new Error("Agent stream closed before the run started"))
+      }
+    }
+  }, [])
 
   const onCreated = useCallback(() => {
-    invalidateAgentThreadLists(queryClient);
-  }, [queryClient]);
+    runStartWaitersRef.current[0]?.resolve()
+    invalidateAgentThreadLists(queryClient)
+  }, [queryClient])
 
   const onCompleted = useCallback(() => {
-    const id = threadIdRef.current;
+    const id = threadIdRef.current
     if (id) {
-      void queryClient.invalidateQueries({ queryKey: agentThreadKeys.detail(id) });
+      void queryClient.invalidateQueries({
+        queryKey: agentThreadKeys.detail(id),
+      })
     }
-    invalidateAgentThreadLists(queryClient);
-  }, [queryClient]);
+    invalidateAgentThreadLists(queryClient)
+  }, [queryClient])
 
   return (
-    <StreamProvider
-      apiUrl={agentStreamApiUrl}
-      assistantId={AGENT_ASSISTANT_ID}
-      fetch={dashboardFetch}
-      threadId={threadId ?? undefined}
-      onCreated={onCreated}
-      onCompleted={onCompleted}
-    >
-      {children}
-    </StreamProvider>
-  );
+    <AgentRunStartConfirmationContext.Provider value={confirmRunStart}>
+      <StreamProvider
+        apiUrl={agentStreamApiUrl}
+        assistantId={AGENT_ASSISTANT_ID}
+        fetch={dashboardFetch}
+        threadId={threadId ?? undefined}
+        onCreated={onCreated}
+        onCompleted={onCompleted}
+      >
+        {children}
+      </StreamProvider>
+    </AgentRunStartConfirmationContext.Provider>
+  )
 }

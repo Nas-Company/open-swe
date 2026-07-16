@@ -68,6 +68,17 @@ def test_construct_system_prompt_explains_pause_to_ask_for_dependency_review() -
     assert "You cannot pause to ask for approval mid-task" not in prompt
 
 
+def test_construct_system_prompt_requires_browser_visual_qa() -> None:
+    prompt = construct_system_prompt(working_dir="/workspace")
+
+    assert "Browser and Visual QA" in prompt
+    assert "Chromium/Playwright" in prompt
+    assert "desktop viewport and a mobile viewport" in prompt
+    assert "under 500 KiB" in prompt
+    assert "actually call `read_file` on every final screenshot" in prompt
+    assert "Only claim visual QA is complete" in prompt
+
+
 def test_construct_system_prompt_identifies_own_repo() -> None:
     from agent.prompt import OPEN_SWE_SHARED_BASE
 
@@ -164,7 +175,10 @@ def test_construct_system_prompt_forbids_force_push() -> None:
     assert "Never force-push." in prompt
     assert "Never run `git push --force`" in prompt
     assert "`origin/<branch>`" in prompt
-    assert "git pull --rebase origin <branch>" in prompt
+    assert 'GH_TOKEN="${GH_TOKEN:-dummy}" git fetch origin' in prompt
+    assert "git rebase origin/<branch>" in prompt
+    assert "git pull --rebase" not in prompt
+    assert "gh pr view --json url --jq" not in prompt
 
 
 def test_construct_system_prompt_includes_coauthor_trailer_when_identity_present() -> None:

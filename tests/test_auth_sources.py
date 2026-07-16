@@ -4,7 +4,13 @@ import asyncio
 
 import pytest
 
-from agent.utils import auth
+from agent.utils import auth, github_token
+
+
+@pytest.fixture(autouse=True)
+def _clear_token_source_cache() -> None:
+    github_token._GITHUB_TOKEN_CACHE.clear()
+    github_token._GITHUB_TOKEN_SOURCES.clear()
 
 
 def test_leave_failure_comment_posts_generic_token_free_slack_notice(
@@ -88,6 +94,21 @@ def test_resolve_github_token_slack_uses_dashboard_store(
 
     assert token == "user-tok"
     assert expires_at == "2099-01-01T00:00:00Z"
+    assert github_token.get_github_token_source_for_thread("t1") == "user"
+
+
+def test_bot_installation_token_is_marked_refreshable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_app_token():
+        return "bot-tok", "2099-01-01T00:00:00Z"
+
+    monkeypatch.setattr(auth, "get_github_app_installation_token_with_expiry", fake_app_token)
+
+    token, _ = asyncio.run(auth._resolve_bot_installation_token("t1"))
+
+    assert token == "bot-tok"
+    assert github_token.get_github_token_source_for_thread("t1") == "app"
 
 
 def test_resolve_github_token_slack_ignores_stale_thread_cache(
