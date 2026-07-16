@@ -15,8 +15,8 @@ class ModelOption(TypedDict):
 
 SUPPORTED_MODELS: list[ModelOption] = [
     {
-        "id": "openai:gpt-5.5",
-        "label": "Codex Proxy GPT-5.5",
+        "id": "openai:gpt-5.6-sol",
+        "label": "Codex Proxy GPT-5.6 SOL",
         "efforts": ["low", "medium", "high", "xhigh"],
         "default_effort": "medium",
         "supports_images": True,
@@ -32,7 +32,7 @@ SUPPORTED_MODELS: list[ModelOption] = [
 
 SUPPORTED_MODEL_IDS: frozenset[str] = frozenset(m["id"] for m in SUPPORTED_MODELS)
 
-DEFAULT_MODEL_ID: str = "openai:gpt-5.5"
+DEFAULT_MODEL_ID: str = "openai:gpt-5.6-sol"
 DEFAULT_MODEL_EFFORT: str = "medium"
 
 

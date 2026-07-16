@@ -22,11 +22,11 @@ def test_make_model_uses_codex_proxy_config(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("CODEX_PROXY_BASE_URL", "http://codex-proxy:8080/v1/")
     monkeypatch.setenv("CODEX_PROXY_API_KEY", "proxy-key")
     with patch("agent.utils.model.init_chat_model", return_value=sentinel.chat_model) as init:
-        result = model.make_model("openai:gpt-5.5", max_tokens=16_000)
+        result = model.make_model("openai:gpt-5.6-sol", max_tokens=16_000)
 
         assert result is sentinel.chat_model
         init.assert_called_once_with(
-            model="openai:gpt-5.5",
+            model="openai:gpt-5.6-sol",
             max_tokens=16_000,
             max_retries=model.DEFAULT_MAX_RETRIES,
             base_url="http://codex-proxy:8080/v1",
@@ -41,7 +41,7 @@ def test_make_model_uses_openai_base_url_with_codex_proxy_key(
     monkeypatch.setenv("OPENAI_BASE_URL", "https://codex-proxy.example.com/v1")
     monkeypatch.setenv("CODEX_PROXY_API_KEY", "proxy-key")
     with patch("agent.utils.model.init_chat_model", return_value=sentinel.chat_model) as init:
-        model.make_model("openai:gpt-5.5")
+        model.make_model("openai:gpt-5.6-sol")
 
     kwargs = init.call_args.kwargs
     assert kwargs["base_url"] == "https://codex-proxy.example.com/v1"
@@ -54,7 +54,7 @@ def test_make_model_does_not_send_codex_proxy_key_to_default_openai(
 ) -> None:
     monkeypatch.setenv("CODEX_PROXY_API_KEY", "proxy-key")
     with patch("agent.utils.model.init_chat_model", return_value=sentinel.chat_model) as init:
-        model.make_model("openai:gpt-5.5")
+        model.make_model("openai:gpt-5.6-sol")
 
     kwargs = init.call_args.kwargs
     assert kwargs["base_url"] == model.OPENAI_RESPONSES_WS_BASE_URL
@@ -66,7 +66,7 @@ def test_make_model_uses_openai_api_key_for_default_openai(
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     with patch("agent.utils.model.init_chat_model", return_value=sentinel.chat_model) as init:
-        model.make_model("openai:gpt-5.5")
+        model.make_model("openai:gpt-5.6-sol")
 
     kwargs = init.call_args.kwargs
     assert kwargs["base_url"] == model.OPENAI_RESPONSES_WS_BASE_URL
@@ -81,7 +81,7 @@ def test_provider_model_kwargs_sets_reasoning_effort_for_codex_proxy(
 ) -> None:
     monkeypatch.setenv("CODEX_PROXY_BASE_URL", "https://codexproxy.example.com/v1")
 
-    kwargs = model.provider_model_kwargs("openai:gpt-5.5", effort, max_tokens=16_000)
+    kwargs = model.provider_model_kwargs("openai:gpt-5.6-sol", effort, max_tokens=16_000)
 
     assert kwargs == {"max_tokens": 16_000, "reasoning_effort": effort}
 
@@ -91,7 +91,7 @@ def test_provider_model_kwargs_omits_unsupported_reasoning_effort_for_codex_prox
 ) -> None:
     monkeypatch.setenv("CODEX_PROXY_BASE_URL", "https://codexproxy.example.com/v1")
 
-    kwargs = model.provider_model_kwargs("openai:gpt-5.5", "none", max_tokens=16_000)
+    kwargs = model.provider_model_kwargs("openai:gpt-5.6-sol", "none", max_tokens=16_000)
 
     assert kwargs == {"max_tokens": 16_000}
 
@@ -100,7 +100,7 @@ def test_validate_local_dev_llm_config_accepts_codex_proxy_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("DASHBOARD_BASE_URL", "http://localhost:5173")
-    monkeypatch.setenv("LLM_MODEL_ID", "openai:gpt-5.5")
+    monkeypatch.setenv("LLM_MODEL_ID", "openai:gpt-5.6-sol")
     monkeypatch.setenv("CODEX_PROXY_BASE_URL", "http://codex-proxy:8080/v1")
     monkeypatch.setenv("CODEX_PROXY_API_KEY", "proxy-key")
 
@@ -111,7 +111,7 @@ def test_validate_local_dev_llm_config_rejects_codex_proxy_key_without_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("DASHBOARD_BASE_URL", "http://localhost:5173")
-    monkeypatch.setenv("LLM_MODEL_ID", "openai:gpt-5.5")
+    monkeypatch.setenv("LLM_MODEL_ID", "openai:gpt-5.6-sol")
     monkeypatch.setenv("CODEX_PROXY_API_KEY", "proxy-key")
 
     with pytest.raises(ValueError, match="CODEX_PROXY"):

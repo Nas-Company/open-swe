@@ -54,6 +54,7 @@ from .integrations.langsmith_tools import load_langsmith_tools
 from .integrations.live_issue_mcp import load_live_issue_tools
 from .integrations.notion_mcp import load_notion_tools
 from .middleware import (
+    CodexProxyToolImageMiddleware,
     ModelFallbackMiddleware,
     PlanModeMiddleware,
     SandboxCircuitBreakerMiddleware,
@@ -675,6 +676,7 @@ def _general_purpose_subagent(model: BaseChatModel) -> SubAgent:
         "description": GENERAL_PURPOSE_SUBAGENT["description"],
         "system_prompt": GENERAL_PURPOSE_SUBAGENT["system_prompt"],
         "model": model,
+        "middleware": [CodexProxyToolImageMiddleware()],
     }
 
 
@@ -998,6 +1000,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
             SandboxCircuitBreakerMiddleware(),
             *fallback_middleware,
             *plan_mode_middleware,
+            CodexProxyToolImageMiddleware(),
             SanitizeThinkingBlocksMiddleware(),
         ],
     ).with_config(config)

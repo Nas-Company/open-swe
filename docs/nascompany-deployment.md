@@ -69,8 +69,9 @@ LangSmith/LangGraph:
   LANGGRAPH_HOST_URL
 
 LLM:
+  CODEX_PROXY_BASE_URL / CODEX_PROXY_API_KEY
   ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL
-  OPENAI_API_KEY
+  OPENAI_API_KEY (only for direct OpenAI fallback outside Codex Proxy)
   GOOGLE_API_KEY
   FIREWORKS_API_KEY
   LLM_FALLBACK_MODEL_ID
@@ -135,6 +136,19 @@ DEFAULT_REPO_OWNER=Nas-Company
 DEFAULT_REPO_NAME=open-swe
 ```
 
+Model routing intent:
+
+```text
+OpenAI-compatible endpoint: Codex Proxy
+Default agent model: openai:gpt-5.6-sol (medium)
+Default agent subagent model: openai:gpt-5.6-sol (medium)
+LLM_FALLBACK_MODEL_ID=openai:gpt-5.6-sol
+```
+
+The fallback secret intentionally matches the default so a failed SOL request
+does not silently fall back to the retired GPT-5.5 route. MiniMax remains a
+selectable cross-provider option in the dashboard.
+
 Modal ownership:
 
 ```text
@@ -181,6 +195,26 @@ Dashboard messages can attach UTF-8 `.md`, `.html`, `.json`, `.csv`, and `.txt`
 files. The limits are five files, 2 MiB per file, and 10 MiB combined. The
 backend validates them, writes them under `/workspace/.open-swe/attachments/`,
 and replaces base64 blocks with exact sandbox paths before the model call.
+
+### Rendered-page visual QA
+
+Playwright supplies deterministic rendering and objective browser diagnostics;
+the model supplies the independent pixel-level review. For HTML and report work,
+the agent renders desktop and mobile views, captures a full-page overview plus
+legible viewport/section tiles for long pages, and calls `read_file` on each
+final screenshot. It records image observations separately from console, page,
+network, overflow, and accessibility diagnostics, then fixes and rerenders until
+both evidence sets pass.
+
+Codex Proxy uses Chat Completions. That API path accepts user-message images but
+can silently ignore image content carried directly by a tool-role message. The
+`CodexProxyToolImageMiddleware` therefore mirrors the latest image results from
+`read_file`, plus a bounded pending batch when intervening tool calls contain no
+durable visual observations, into one transient user-role multimodal message.
+The original thread messages and dashboard artifacts remain unchanged, all
+parallel tool results still precede the mirrored user message, and acknowledged
+or out-of-window screenshots are stripped from later provider requests. Visual
+read batches are capped at eight images and roughly 6 MiB of encoded payload.
 
 ## Frontend Environment
 

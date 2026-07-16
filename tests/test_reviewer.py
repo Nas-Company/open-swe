@@ -230,6 +230,7 @@ async def test_reviewer_resolves_app_installation_token_at_run_start() -> None:
     )
     middleware = create_agent.call_args.kwargs["middleware"]
     assert reviewer.check_message_queue_before_model in middleware
+    assert any(isinstance(item, reviewer.CodexProxyToolImageMiddleware) for item in middleware)
 
 
 @pytest.mark.asyncio
@@ -327,7 +328,7 @@ async def test_reviewer_applies_eval_model_and_effort_overrides() -> None:
             "head_sha": "head",
             "reviewer_model_id": "anthropic:claude-opus-4-8",
             "reviewer_reasoning_effort": "high",
-            "reviewer_subagent_model_id": "openai:gpt-5.5",
+            "reviewer_subagent_model_id": "openai:gpt-5.6-sol",
             "reviewer_subagent_reasoning_effort": "low",
         },
         "metadata": {},
@@ -360,7 +361,7 @@ async def test_reviewer_applies_eval_model_and_effort_overrides() -> None:
     assert main_model_call.kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert main_model_call.kwargs["effort"] == "high"
     subagent_model_call = make_model.call_args_list[1]
-    assert subagent_model_call.args == ("openai:gpt-5.5",)
+    assert subagent_model_call.args == ("openai:gpt-5.6-sol",)
     assert subagent_model_call.kwargs["reasoning"] == {"effort": "low", "summary": "auto"}
 
 
