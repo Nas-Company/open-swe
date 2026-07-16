@@ -18,9 +18,7 @@ def is_retryable_sandbox_connection_error(exc: Exception) -> bool:
     message = str(exc).lower()
 
     if class_name == "NotFoundError" and (
-        module.startswith("modal")
-        or "sandbox" in message
-        or "container" in message
+        module.startswith("modal") or "sandbox" in message or "container" in message
     ):
         return "not found" in message or "shut down" in message
 
