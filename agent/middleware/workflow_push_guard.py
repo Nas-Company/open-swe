@@ -155,11 +155,11 @@ def _backend(thread_id: str | None) -> Any | None:
 def _response_output(response: Any) -> str:
     output = getattr(response, "output", None)
     if isinstance(output, str):
-        return output
+        return "" if output.strip() == "<no output>" else output
     if isinstance(response, Mapping):
         value = response.get("output")
         if isinstance(value, str):
-            return value
+            return "" if value.strip() == "<no output>" else value
     return str(response or "")
 
 

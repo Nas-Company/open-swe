@@ -127,6 +127,11 @@ def test_parse_git_push_supports_git_c_and_cd() -> None:
     assert guard._parse_git_push("git push origin feature; git push origin evil:feature") is None
 
 
+def test_response_output_normalizes_local_backend_empty_sentinel() -> None:
+    assert guard._response_output(_Response("<no output>")) == ""
+    assert guard._response_output({"output": "<no output>"}) == ""
+
+
 @pytest.mark.parametrize(
     "command",
     [
