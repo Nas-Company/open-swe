@@ -4,7 +4,7 @@ Mirrors `agent.server.get_agent`'s sandbox lifecycle but configures a deep
 agent for code review only:
 
 - Deterministic repo prep (clone-or-fetch + checkout) before the agent's first
-  model call so the LLM doesn't burn tokens narrating ``gh repo clone``.
+  model call so the LLM doesn't burn tokens narrating repo setup.
 - A computed unified diff and the set of (file, line) tuples in that diff,
   passed via the runnable config so ``add_finding`` can validate at creation
   time rather than failing at GitHub-publish time.
@@ -81,7 +81,11 @@ from .tools import (
 )
 from .utils.agents_md import fetch_agents_md
 from .utils.api_standards_skill import fetch_api_standards_skill
-from .utils.github_app import get_github_app_installation_token_with_expiry
+from .utils.github_app import (
+    READ_ONLY_SANDBOX_TOKEN_PERMISSIONS,
+    REVIEWER_API_TOKEN_PERMISSIONS,
+    get_github_app_installation_token_with_expiry,
+)
 from .utils.github_token import cache_github_token_for_thread
 from .utils.model import DEFAULT_LLM_REASONING, make_model, provider_model_kwargs
 from .utils.repo_prep import materialize_trusted_skills, prepare_review_repo
@@ -90,18 +94,18 @@ from .utils.tracing import REVIEW_TRACING_PROJECT, traced_graph_factory
 
 REVIEWER_PROMPT_TEMPLATE = """You are a specialized code reviewer agent. Your job is to review one GitHub PR and publish a single review.
 
-Sandbox: `{working_dir}`. Invoke `gh` as `GH_TOKEN=dummy gh <command>`.
+Sandbox: `{working_dir}`. Invoke `gh` as `GH_TOKEN="${{GH_TOKEN:-dummy}}" gh <command>`.
 
 Fetch the diff:
 
 ```
-GH_TOKEN=dummy gh pr diff {pr_number} --repo {repo_owner}/{repo_name}
+GH_TOKEN="${{GH_TOKEN:-dummy}}" gh pr diff {pr_number} --repo {repo_owner}/{repo_name}
 ```
 
 Re-review (user message says "A new commit has been pushed"):
 
 ```
-GH_TOKEN=dummy gh api repos/{repo_owner}/{repo_name}/compare/<last_reviewed_sha>...<head_sha> -H "Accept: application/vnd.github.v3.diff"
+GH_TOKEN="${{GH_TOKEN:-dummy}}" gh api repos/{repo_owner}/{repo_name}/compare/<last_reviewed_sha>...<head_sha> -H "Accept: application/vnd.github.v3.diff"
 ```
 
 {repo_checkout_note}
@@ -338,17 +342,46 @@ _REPO_READY_NOTE = """The repo is already cloned and checked out at the PR head 
 
 _REPO_NOT_READY_NOTE = """Repo prep FAILED: the checkout in `{working_dir}` may be missing or — worse —
 present but stale (at an old commit). Do NOT trust local files until you have
-re-prepped the tree yourself. Run:
+re-prepped the tree yourself. Run each command below in a separate execute call.
+First check whether the checkout exists:
 
 ```
-cd {working_dir} || {{ cd {parent_dir} && GH_TOKEN=dummy gh repo clone {repo_owner}/{repo_name} && cd {repo_name}; }}
-GH_TOKEN=dummy git fetch origin {head_sha_or_placeholder} --quiet || GH_TOKEN=dummy git fetch origin refs/pull/{pr_number}/head --quiet
-git checkout --force {head_sha_or_placeholder} --quiet
+test -d {working_dir}/.git
 ```
 
-and verify `git rev-parse HEAD` matches the PR head before reading local
-files. If you cannot get the tree onto the PR head, rely exclusively on the
-diff and `gh api` file contents (`GH_TOKEN=dummy gh api
+If that check fails, clone the repo with this single authenticated command:
+
+```
+cd {parent_dir} && git clone --no-checkout --quiet https://github.com/{repo_owner}/{repo_name}.git {working_dir}
+```
+
+Then fetch the exact head with this single authenticated command:
+
+```
+cd {working_dir} && GH_TOKEN="${{GH_TOKEN:-dummy}}" git fetch origin {head_sha_or_placeholder} --quiet
+```
+
+If that fetch fails because the head belongs to a fork, run this fallback as
+another separate authenticated command:
+
+```
+cd {working_dir} && GH_TOKEN="${{GH_TOKEN:-dummy}}" git fetch origin refs/pull/{pr_number}/head --quiet
+```
+
+Finally run the local checkout and verification as separate commands:
+
+```
+git -C {working_dir} checkout --force {head_sha_or_placeholder} --quiet
+```
+
+```
+git -C {working_dir} rev-parse HEAD
+```
+
+Verify the final output matches the PR head before reading local files. Never
+combine authenticated `git`/`gh` operations with another operation in one
+execute call. If you cannot get the tree onto the PR head, rely exclusively on
+the diff and `gh api` file contents (`GH_TOKEN="${{GH_TOKEN:-dummy}}" gh api
 repos/{repo_owner}/{repo_name}/contents/<path>?ref=<head_sha>`) — never on
 the local checkout."""
 
@@ -530,7 +563,7 @@ def _build_first_review_context(
         f"{overview_section}"
         f"{prior_section}\n"
         f"Fetch the diff yourself with "
-        f"`GH_TOKEN=dummy gh pr diff {pr_number} --repo {repo_owner}/{repo_name}`, "
+        f'`GH_TOKEN="${{GH_TOKEN:-dummy}}" gh pr diff {pr_number} --repo {repo_owner}/{repo_name}`, '
         f"then review using the ordered passes (mechanical grep → diff-line audit "
         f"→ security/auth if applicable → pipeline sweep → deep flow).\n\n"
         f"This is a first review — there are no existing findings recorded by "
@@ -572,7 +605,7 @@ def _build_re_review_context(
         f"## Existing findings\n\n{existing_findings_block}\n\n"
         f"{prior_threads_section}"
         f"Fetch the diff since the previous reviewed SHA yourself with "
-        f"`GH_TOKEN=dummy gh api repos/{repo_owner}/{repo_name}/compare/"
+        f'`GH_TOKEN="${{GH_TOKEN:-dummy}}" gh api repos/{repo_owner}/{repo_name}/compare/'
         f'{last_reviewed_sha}...{head_sha} -H "Accept: application/vnd.github.v3.diff"`, '
         f"then review only what's in that diff.\n\n"
         f"For each open finding above, decide whether the new commits resolved "
@@ -834,25 +867,30 @@ async def get_reviewer_agent(config: RunnableConfig) -> Pregel:
         return create_deep_agent(system_prompt="", tools=[]).with_config(config)
 
     repo_config = config["configurable"].get("repo") or {}
-    github_token: str | None = None
+    github_api_token: str | None = None
     if config["configurable"].get("source"):
         # Reviewer runs always act as the GitHub App (open-swe[bot]). Resolve the
         # installation token in this process at run start rather than relying on a
         # token cached by the webhook handler, which runs in a separate process. The
         # App token also bypasses org SAML enforcement that blocks user OAuth tokens.
         repo_name = str(repo_config.get("name") or "")
-        github_token, expires_at = await get_github_app_installation_token_with_expiry(
-            repositories=[repo_name] if repo_name else None
+        github_api_token, expires_at = await get_github_app_installation_token_with_expiry(
+            repositories=[repo_name] if repo_name else None,
+            permissions=REVIEWER_API_TOKEN_PERMISSIONS,
         )
-        if not github_token:
+        if not github_api_token:
             raise RuntimeError(
                 f"GitHub App installation token unavailable for reviewer thread {thread_id}"
             )
-        # Cache in-process so reviewer tools and the sandbox proxy can read it this run.
-        cache_github_token_for_thread(thread_id, github_token, expires_at=expires_at)
+        # Cache only for trusted server-side reviewer tools; the sandbox receives
+        # a separately minted read-only token through ensure_sandbox_for_thread.
+        cache_github_token_for_thread(
+            thread_id,
+            github_api_token,
+            expires_at=expires_at,
+            source="app",
+        )
 
-    github_proxy_token = github_token
-    github_api_token = github_token
     repo_name_for_scope = str(repo_config.get("name") or "")
     repo_for_snapshot = (
         {"owner": str(repo_config["owner"]), "name": str(repo_config["name"])}
@@ -861,8 +899,8 @@ async def get_reviewer_agent(config: RunnableConfig) -> Pregel:
     )
     sandbox_backend = await ensure_sandbox_for_thread(
         thread_id,
-        github_proxy_token=github_proxy_token,
         github_proxy_repositories=[repo_name_for_scope] if repo_name_for_scope else None,
+        github_proxy_permissions=READ_ONLY_SANDBOX_TOKEN_PERMISSIONS,
         repo=repo_for_snapshot,
     )
 
@@ -1126,7 +1164,6 @@ async def get_reviewer_agent(config: RunnableConfig) -> Pregel:
         or config["configurable"].get("eval") is True
     )
     github_api_token = None
-    github_token = None
 
     system_prompt = _reviewer_system_prompt(
         f"{work_dir}/{repo_name}" if repo_name else work_dir,

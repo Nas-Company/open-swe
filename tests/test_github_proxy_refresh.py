@@ -12,7 +12,10 @@ from agent.utils.github_proxy import (
     PROXY_TOKEN_FALLBACK_TTL,
     clear_proxy_token_expiry,
     maybe_refresh_proxy_token,
+    proxy_token_is_app_managed,
     proxy_token_needs_refresh,
+    proxy_token_permissions,
+    proxy_token_repositories,
     record_proxy_token_expiry,
 )
 
@@ -58,6 +61,25 @@ class TestProxyTokenNeedsRefresh:
         record_proxy_token_expiry("thread-1", datetime.now(UTC))
         clear_proxy_token_expiry("thread-1")
         assert proxy_token_needs_refresh("thread-1") is False
+
+    def test_app_management_and_repository_scope_are_explicit(self) -> None:
+        assert proxy_token_is_app_managed("thread-1") is False
+        assert proxy_token_repositories("thread-1") is None
+        assert proxy_token_permissions("thread-1") is None
+
+        record_proxy_token_expiry(
+            "thread-1",
+            datetime.now(UTC),
+            repositories=["nas-reporting"],
+            permissions={"contents": "read", "pull_requests": "read"},
+        )
+
+        assert proxy_token_is_app_managed("thread-1") is True
+        assert proxy_token_repositories("thread-1") == ("nas-reporting",)
+        assert proxy_token_permissions("thread-1") == {
+            "contents": "read",
+            "pull_requests": "read",
+        }
 
 
 class TestMaybeRefreshProxyToken:
@@ -110,6 +132,25 @@ class TestMaybeRefreshProxyToken:
         assert permissions == ()
 
     @pytest.mark.asyncio
+    async def test_refreshes_modal_command_scoped_token(self) -> None:
+        now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+        record_proxy_token_expiry("thread-1", now + timedelta(minutes=1))
+        backend = MagicMock(id="sb-modal")
+
+        with (
+            patch.dict("os.environ", {"SANDBOX_TYPE": "modal"}),
+            patch.dict(github_proxy.SANDBOX_BACKENDS, {"thread-1": backend}, clear=True),
+            patch(
+                "agent.utils.github_proxy.get_github_app_installation_token_with_expiry",
+                new=AsyncMock(return_value=("ghs_modal_new", "2025-01-01T13:00:00Z")),
+            ),
+        ):
+            result = await maybe_refresh_proxy_token("thread-1", now=now)
+
+        assert result is True
+        backend.set_github_token.assert_called_once_with("ghs_modal_new")
+
+    @pytest.mark.asyncio
     async def test_preserves_repo_scope_on_refresh(self) -> None:
         now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
         record_proxy_token_expiry("thread-1", now + timedelta(minutes=1), repositories=["open-swe"])
@@ -132,6 +173,37 @@ class TestMaybeRefreshProxyToken:
         _expires, _recorded, scope, permissions = github_proxy._PROXY_TOKEN_EXPIRY["thread-1"]
         assert scope == ("open-swe",)
         assert permissions == ()
+
+    @pytest.mark.asyncio
+    async def test_preserves_read_only_permissions_on_refresh(self) -> None:
+        now = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
+        read_only = {"contents": "read", "pull_requests": "read", "issues": "read"}
+        record_proxy_token_expiry(
+            "thread-1",
+            now + timedelta(minutes=1),
+            repositories=["open-swe"],
+            permissions=read_only,
+        )
+        backend = MagicMock(id="sb-modal")
+        token_mock = AsyncMock(return_value=("ghs_read", "2025-01-01T13:00:00Z"))
+
+        with (
+            patch.dict("os.environ", {"SANDBOX_TYPE": "modal"}),
+            patch.dict(github_proxy.SANDBOX_BACKENDS, {"thread-1": backend}, clear=True),
+            patch(
+                "agent.utils.github_proxy.get_github_app_installation_token_with_expiry",
+                new=token_mock,
+            ),
+        ):
+            result = await maybe_refresh_proxy_token("thread-1", now=now)
+
+        assert result is True
+        token_mock.assert_awaited_once_with(
+            repositories=["open-swe"],
+            permissions=read_only,
+        )
+        backend.set_github_token.assert_called_once_with("ghs_read")
+        assert proxy_token_permissions("thread-1") == read_only
 
     @pytest.mark.asyncio
     async def test_no_refresh_when_token_unavailable(self) -> None:

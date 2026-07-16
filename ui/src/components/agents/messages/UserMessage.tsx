@@ -2,6 +2,7 @@ import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import { MessageTimestamp } from "./MessageTimestamp";
 import type { Message } from "@/lib/agents/types";
+import { FileAttachmentPill } from "@/components/agents/FileAttachmentPill";
 
 export function UserMessage({ message }: { message: Message }) {
   const text = message.chunks
@@ -10,6 +11,7 @@ export function UserMessage({ message }: { message: Message }) {
     .join("");
 
   const images = message.chunks.filter((c) => c.kind === "image");
+  const files = message.chunks.filter((c) => c.kind === "file");
   const textRef = useRef<HTMLDivElement>(null);
   const [scrolledFromTop, setScrolledFromTop] = useState(false);
   const [scrolledFromBottom, setScrolledFromBottom] = useState(false);
@@ -37,6 +39,17 @@ export function UserMessage({ message }: { message: Message }) {
   return (
     <div className="flex justify-end my-4">
       <div className="max-w-[78%]">
+        {files.length > 0 && (
+          <div className="flex gap-1.5 mb-2 flex-wrap justify-end">
+            {files.map((file, index) => (
+              <FileAttachmentPill
+                key={`${file.fileName}-${index}`}
+                fileName={file.fileName}
+                mimeType={file.mimeType}
+              />
+            ))}
+          </div>
+        )}
         {images.length > 0 && (
           <div className="flex gap-2 mb-2 flex-wrap justify-end">
             {images.map((img, i) => (

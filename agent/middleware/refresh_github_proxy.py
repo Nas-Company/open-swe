@@ -1,10 +1,8 @@
-"""Before-model middleware that keeps the sandbox GitHub proxy token fresh.
+"""Before-model middleware that keeps sandbox GitHub authentication fresh.
 
-The LangSmith sandbox proxy is configured with a GitHub App installation token
-that expires after exactly one hour. Long runs would otherwise hit 401s on
-every ``gh``/``git`` call once that snapshot goes stale. This hook re-configures
-the proxy with a fresh token before each model call when the recorded token is
-near expiry.
+GitHub App installation tokens expire after one hour. Long LangSmith or Modal
+runs would otherwise hit 401s on every ``gh``/``git`` call. This hook refreshes
+provider-specific auth before each model call when the token is near expiry.
 """
 
 from __future__ import annotations
@@ -26,7 +24,7 @@ async def refresh_github_proxy_before_model(
     state: AgentState,  # noqa: ARG001
     runtime: Runtime,  # noqa: ARG001
 ) -> dict[str, Any] | None:
-    """Refresh the sandbox proxy's GitHub token before it expires mid-run."""
+    """Refresh the sandbox GitHub token before it expires mid-run."""
     try:
         config = get_config()
         thread_id = config.get("configurable", {}).get("thread_id")
@@ -40,7 +38,7 @@ async def refresh_github_proxy_before_model(
         await maybe_refresh_proxy_token(thread_id)
     except Exception:  # noqa: BLE001
         logger.warning(
-            "Failed to refresh GitHub proxy token for thread %s",
+            "Failed to refresh sandbox GitHub token for thread %s",
             thread_id,
             exc_info=True,
         )

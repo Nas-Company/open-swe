@@ -1,10 +1,8 @@
-"""Track and refresh the GitHub App token baked into a sandbox's proxy.
+"""Track and refresh the GitHub App token used by authenticated sandboxes.
 
-The LangSmith sandbox proxy is configured once at run start with a GitHub App
-installation token. Those tokens expire after exactly one hour, so any agent
-run longer than ~1h would start seeing 401s on every ``gh``/``git`` call in the
-sandbox. This module records when each thread's proxy token expires and lets a
-before-model middleware re-configure the proxy before it goes stale.
+LangSmith applies the token through an opaque network proxy; Modal injects it
+only into each command process. Installation tokens expire after one hour, so
+this module records expiry and refreshes provider auth before it goes stale.
 """
 
 from __future__ import annotations
@@ -91,6 +89,33 @@ def clear_proxy_token_expiry(thread_id: str | None) -> None:
         _PROXY_TOKEN_EXPIRY.pop(thread_id, None)
 
 
+def proxy_token_is_app_managed(thread_id: str | None) -> bool:
+    """Whether sandbox auth for ``thread_id`` is backed by a refreshable App token."""
+    return bool(thread_id and thread_id in _PROXY_TOKEN_EXPIRY)
+
+
+def proxy_token_repositories(thread_id: str | None) -> tuple[str, ...] | None:
+    """Return the recorded App-token repository scope without exposing the token."""
+    if not thread_id:
+        return None
+    record = _PROXY_TOKEN_EXPIRY.get(thread_id)
+    if record is None:
+        return None
+    _expires_at, _recorded_at, repositories, _permissions = _unpack_proxy_token_record(record)
+    return repositories
+
+
+def proxy_token_permissions(thread_id: str | None) -> dict[str, str] | None:
+    """Return the recorded App-token permission scope without exposing the token."""
+    if not thread_id:
+        return None
+    record = _PROXY_TOKEN_EXPIRY.get(thread_id)
+    if record is None:
+        return None
+    _expires_at, _recorded_at, _repositories, permissions = _unpack_proxy_token_record(record)
+    return dict(permissions) if permissions else None
+
+
 def _unpack_proxy_token_record(record: tuple[Any, ...]) -> ProxyTokenRecord:
     expires_at, recorded_at, repositories, *rest = record
     permissions = rest[0] if rest else ()
@@ -118,8 +143,9 @@ async def refresh_proxy_token(
     repositories: Sequence[str] | None = None,
     permissions: PermissionMap | None = None,
 ) -> bool:
-    """Re-configure a LangSmith sandbox proxy with a freshly minted token."""
-    if os.getenv("SANDBOX_TYPE", "langsmith") != "langsmith" or not thread_id:
+    """Re-configure sandbox GitHub auth with a freshly minted token."""
+    sandbox_type = os.getenv("SANDBOX_TYPE", "langsmith")
+    if sandbox_type not in {"langsmith", "modal"} or not thread_id:
         return False
 
     sandbox_backend = SANDBOX_BACKENDS.get(thread_id)
@@ -141,10 +167,17 @@ async def refresh_proxy_token(
         logger.warning("Proxy token refresh for thread %s failed: no installation token", thread_id)
         return False
 
-    from ..integrations.langsmith import _configure_github_proxy
+    if sandbox_type == "langsmith":
+        from ..integrations.langsmith import _configure_github_proxy
 
-    current_backend = unwrap_sandbox_backend(sandbox_backend)
-    await asyncio.to_thread(_configure_github_proxy, current_backend.id, token)
+        current_backend = unwrap_sandbox_backend(sandbox_backend)
+        await asyncio.to_thread(_configure_github_proxy, current_backend.id, token)
+    else:
+        setter = getattr(sandbox_backend, "set_github_token", None)
+        if not callable(setter):
+            logger.warning("Modal sandbox for thread %s cannot refresh GitHub auth", thread_id)
+            return False
+        setter(token)
     record_proxy_token_expiry(
         thread_id,
         expires_at,
@@ -156,10 +189,9 @@ async def refresh_proxy_token(
 
 
 async def maybe_refresh_proxy_token(thread_id: str | None, *, now: datetime | None = None) -> bool:
-    """Re-configure the sandbox proxy with a fresh token when near expiry.
+    """Re-configure sandbox GitHub auth with a fresh token when near expiry.
 
-    Returns True when a refresh was performed. Only applies to LangSmith
-    sandboxes; other providers don't use the proxy.
+    Returns True when a refresh was performed. Applies to LangSmith and Modal.
     """
     if not thread_id or not proxy_token_needs_refresh(thread_id, now=now):
         return False

@@ -9,6 +9,7 @@ export type ChunkKind =
   | "tool-execution"
   | "todo"
   | "image"
+  | "file"
 
 export type TodoStatus = "pending" | "in_progress" | "completed"
 
@@ -126,6 +127,13 @@ export interface ImageChunk {
   fileName?: string
 }
 
+export interface FileChunk {
+  kind: "file"
+  base64: string
+  mimeType: string
+  fileName: string
+}
+
 export type Chunk =
   | TextChunk
   | ReasoningChunk
@@ -135,6 +143,7 @@ export type Chunk =
   | ToolExecutionChunk
   | TodoChunk
   | ImageChunk
+  | FileChunk
 
 export interface Message {
   id: string

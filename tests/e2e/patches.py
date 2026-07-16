@@ -30,6 +30,7 @@ def apply() -> None:
     import importlib
 
     from agent import server
+    from agent.middleware import workflow_push_guard
     from agent.utils import auth, authorship
     from agent.utils import slack as slack_utils
 
@@ -38,7 +39,7 @@ def apply() -> None:
     # actual module object by name instead.
     opr = importlib.import_module("agent.tools.open_pull_request")
 
-    from e2e_env import FAKE_GITHUB_API, FAKE_SLACK_API
+    from e2e_env import BARE_REMOTE, FAKE_GITHUB_API, FAKE_SLACK_API, OWNER, REPO
 
     # The LLM is the only agent-internal piece we fake, and only by default.
     # Set E2E_REAL_LLM=1 to drive the harness (mock Slack/GitHub, real agent)
@@ -66,6 +67,18 @@ def apply() -> None:
     # Point the real PR/Slack code at the in-process fakes.
     opr.GITHUB_API = FAKE_GITHUB_API
     slack_utils.SLACK_API_BASE_URL = FAKE_SLACK_API
+
+    # The strict push guard requires a GitHub-shaped destination. Map the one
+    # exact local bare repo that stands in for GitHub back to its fake identity;
+    # the repo-local insteadOf rule keeps the inspected HTTPS operations local.
+    original_github_target = workflow_push_guard._github_target  # noqa: SLF001
+
+    def _fake_github_target(remote: str):
+        if remote == str(BARE_REMOTE):
+            return OWNER, REPO, f"https://github.com/{OWNER}/{REPO}"
+        return original_github_target(remote)
+
+    workflow_push_guard._github_target = _fake_github_target  # noqa: SLF001
 
     # Keep the triggering-user identity lookup offline; the real fallback to
     # config-derived identity (Slack name/email) still runs.

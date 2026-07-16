@@ -37,4 +37,3 @@ def test_observability_allowlist_still_uses_email(monkeypatch: pytest.MonkeyPatc
 
     assert is_observability_authorized("trusted@langchain.dev", login="mallory") is True
     assert is_observability_authorized("other@langchain.dev", login="trusted") is False
-

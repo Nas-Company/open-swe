@@ -41,6 +41,26 @@ class SandboxBackendProxy(SandboxBackendProtocol):
     def replace_backend(self, backend: SandboxBackendProtocol) -> None:
         self._backend = backend
 
+    def set_github_token(self, github_token: str | None) -> None:
+        """Refresh command-scoped auth on providers that support it."""
+        setter = getattr(self._backend, "set_github_token", None)
+        if callable(setter):
+            setter(github_token)
+
+    def set_github_token_for_command(self, github_token: str, command: str) -> None:
+        setter = getattr(self._backend, "set_github_token_for_command", None)
+        if not callable(setter):
+            raise TypeError(
+                "Sandbox backend does not support command-scoped GitHub token overrides"
+            )
+        setter(github_token, command)
+
+    def clear_github_token_for_command(self, github_token: str, command: str) -> bool:
+        clearer = getattr(self._backend, "clear_github_token_for_command", None)
+        if not callable(clearer):
+            return False
+        return bool(clearer(github_token, command))
+
     def ls(self, path: str) -> LsResult:
         return self._backend.ls(path)
 

@@ -1,4 +1,4 @@
-import type { AgentSchedule, AgentThread, ImageChunk, Message } from "./types"
+import type { AgentSchedule, AgentThread, FileChunk, ImageChunk, Message } from "./types"
 
 export type { AgentSchedule, AgentThread, Message }
 
@@ -15,6 +15,7 @@ export class AgentsApiError extends Error {
 export interface ThreadMessageRequest {
   content: string
   images?: Array<ImageChunk>
+  files?: Array<FileChunk>
   model_id?: string | null
   effort?: string | null
   plan_mode?: boolean

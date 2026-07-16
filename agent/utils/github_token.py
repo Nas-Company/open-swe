@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from langgraph.config import get_config
 
@@ -19,6 +19,8 @@ _GITHUB_TOKEN_EXPIRY_SKEW_SECONDS = 60
 _GITHUB_TOKEN_MAX_TTL = timedelta(hours=24)
 # thread_id -> (token, token_expires_at, cached_at)
 _GITHUB_TOKEN_CACHE: dict[str, tuple[str, str | None, datetime]] = {}
+GitHubTokenSource = Literal["user", "app"]
+_GITHUB_TOKEN_SOURCES: dict[str, GitHubTokenSource] = {}
 
 
 class GitHubAuthError(Exception):
@@ -26,13 +28,18 @@ class GitHubAuthError(Exception):
 
 
 def cache_github_token_for_thread(
-    thread_id: str, token: str, expires_at: str | None = None
+    thread_id: str,
+    token: str,
+    expires_at: str | None = None,
+    *,
+    source: GitHubTokenSource = "user",
 ) -> None:
     """Cache a GitHub token in process for the current thread."""
     if not thread_id or not token:
         return
     now = datetime.now(UTC)
     _GITHUB_TOKEN_CACHE[thread_id] = (token, expires_at, now)
+    _GITHUB_TOKEN_SOURCES[thread_id] = source
     _evict_expired(now=now)
 
 
@@ -83,6 +90,7 @@ def _evict_expired(*, now: datetime | None = None) -> None:
     ]
     for tid in stale:
         _GITHUB_TOKEN_CACHE.pop(tid, None)
+        _GITHUB_TOKEN_SOURCES.pop(tid, None)
 
 
 def _cached_token_if_fresh(thread_id: str | None) -> tuple[str | None, str | None]:
@@ -94,6 +102,7 @@ def _cached_token_if_fresh(thread_id: str | None) -> tuple[str | None, str | Non
     token, expires_at, cached_at = cached
     if _entry_expired(expires_at, cached_at, now=datetime.now(UTC)):
         _GITHUB_TOKEN_CACHE.pop(thread_id, None)
+        _GITHUB_TOKEN_SOURCES.pop(thread_id, None)
         logger.info("Cached GitHub token for thread %s has expired; re-resolving", thread_id)
         return None, None
     return token, expires_at
@@ -119,7 +128,16 @@ async def get_github_token_from_thread(thread_id: str) -> tuple[str | None, str 
     return _cached_token_if_fresh(thread_id)
 
 
+def get_github_token_source_for_thread(thread_id: str | None) -> GitHubTokenSource | None:
+    if not thread_id or _cached_token_if_fresh(thread_id) == (None, None):
+        if thread_id:
+            _GITHUB_TOKEN_SOURCES.pop(thread_id, None)
+        return None
+    return _GITHUB_TOKEN_SOURCES.get(thread_id)
+
+
 async def invalidate_cached_github_token(thread_id: str) -> None:
     """Clear a cached GitHub token for a thread."""
     _GITHUB_TOKEN_CACHE.pop(thread_id, None)
+    _GITHUB_TOKEN_SOURCES.pop(thread_id, None)
     logger.info("Invalidated cached GitHub token for thread %s", thread_id)

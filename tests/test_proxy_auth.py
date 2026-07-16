@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from agent.integrations.langsmith import _configure_github_proxy
+from agent.utils import github_proxy
 
 
 class TestSandboxFactoryLoading:
@@ -219,6 +220,94 @@ class TestCreateSandboxWithProxy:
             mock_proxy.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_injects_installation_token_for_modal(self) -> None:
+        """Modal should receive the same short-lived App token per command."""
+        token_mock = AsyncMock(return_value=("ghs_install", "2026-07-16T12:00:00Z"))
+        with (
+            patch(
+                "agent.server.get_github_app_installation_token_with_expiry",
+                new=token_mock,
+            ),
+            patch("agent.server.create_sandbox") as mock_create,
+            patch("agent.server._configure_github_proxy") as mock_proxy,
+            patch.dict("os.environ", {"SANDBOX_TYPE": "modal"}),
+        ):
+            backend = MagicMock(id="sandbox-modal")
+            mock_create.return_value = backend
+
+            from agent.server import _create_sandbox_with_proxy
+
+            result = await _create_sandbox_with_proxy(
+                thread_id="thread-modal",
+                github_proxy_repositories=["nas-reporting"],
+            )
+
+        assert result is backend
+        mock_create.assert_called_once_with(snapshot_id=None)
+        backend.set_github_token.assert_called_once_with("ghs_install")
+        mock_proxy.assert_not_called()
+        token_mock.assert_awaited_once_with(
+            repositories=["nas-reporting"],
+            permissions={
+                "contents": "write",
+                "pull_requests": "write",
+                "issues": "write",
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_modal_mints_and_records_explicit_read_only_scope(self) -> None:
+        read_only = {"contents": "read", "pull_requests": "read", "issues": "read"}
+        token_mock = AsyncMock(return_value=("ghs_read", "2026-07-16T12:00:00Z"))
+        backend = MagicMock(id="sandbox-modal")
+        try:
+            with (
+                patch(
+                    "agent.server.get_github_app_installation_token_with_expiry",
+                    new=token_mock,
+                ),
+                patch("agent.server.create_sandbox", return_value=backend),
+                patch.dict("os.environ", {"SANDBOX_TYPE": "modal"}),
+            ):
+                from agent.server import _create_sandbox_with_proxy
+
+                await _create_sandbox_with_proxy(
+                    thread_id="thread-read-only",
+                    github_proxy_repositories=["nas-reporting"],
+                    github_proxy_permissions=read_only,
+                )
+
+            token_mock.assert_awaited_once_with(
+                repositories=["nas-reporting"],
+                permissions=read_only,
+            )
+            backend.set_github_token.assert_called_once_with("ghs_read")
+            assert github_proxy.proxy_token_permissions("thread-read-only") == read_only
+        finally:
+            github_proxy.clear_proxy_token_expiry("thread-read-only")
+
+    @pytest.mark.asyncio
+    async def test_modal_unmanaged_explicit_token_clears_app_refresh_record(self) -> None:
+        backend = MagicMock(id="sandbox-modal")
+        github_proxy.record_proxy_token_expiry("thread-modal", None)
+        try:
+            with (
+                patch("agent.server.create_sandbox", return_value=backend),
+                patch.dict("os.environ", {"SANDBOX_TYPE": "modal"}),
+            ):
+                from agent.server import _create_sandbox_with_proxy
+
+                await _create_sandbox_with_proxy(
+                    "gho_user",
+                    thread_id="thread-modal",
+                    github_proxy_token_refreshable=False,
+                )
+
+            assert "thread-modal" not in github_proxy._PROXY_TOKEN_EXPIRY
+        finally:
+            github_proxy.clear_proxy_token_expiry("thread-modal")
+
+    @pytest.mark.asyncio
     async def test_raises_when_no_installation_token_for_langsmith(self) -> None:
         """Should raise ValueError when installation token is unavailable for langsmith."""
         with (
@@ -236,6 +325,32 @@ class TestCreateSandboxWithProxy:
 
             with pytest.raises(ValueError, match="installation token is unavailable"):
                 await _create_sandbox_with_proxy()
+            mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_repo_access_fails_before_creating_modal_sandbox(self) -> None:
+        with (
+            patch("agent.server.create_sandbox") as mock_create,
+            patch(
+                "agent.server.get_github_app_installation_token_with_expiry",
+                new_callable=AsyncMock,
+                return_value=(None, None),
+            ) as token_mock,
+            patch.dict("os.environ", {"SANDBOX_TYPE": "modal"}),
+        ):
+            from agent.server import _create_sandbox_with_proxy
+
+            with pytest.raises(
+                ValueError,
+                match="repository scope \\[nas-reporting\\].*user OAuth is intentionally never forwarded",
+            ):
+                await _create_sandbox_with_proxy(
+                    thread_id="thread-modal",
+                    github_proxy_repositories=["nas-reporting"],
+                )
+
+        token_mock.assert_awaited_once()
+        mock_create.assert_not_called()
 
 
 class ModalNotFoundError(Exception):
@@ -275,6 +390,8 @@ class TestSandboxHealthCheck:
             "thread-123",
             github_proxy_token="ghs_proxy",
             github_proxy_repositories=None,
+            github_proxy_permissions=None,
+            github_proxy_token_refreshable=False,
             repo=None,
         )
 
@@ -307,6 +424,42 @@ class TestRefreshProxyOnSandboxReuse:
             },
             "metadata": {},
         }
+
+    @pytest.mark.asyncio
+    async def test_main_agent_keeps_user_oauth_server_side_and_scopes_app_token(self) -> None:
+        config = self._execution_config()
+        mock_sandbox = MagicMock(id="sandbox-modal")
+
+        with (
+            patch(
+                "agent.server.resolve_github_token",
+                new_callable=AsyncMock,
+                return_value=("gho_dashboard", None),
+            ),
+            patch(
+                "agent.server.ensure_sandbox_for_thread",
+                new_callable=AsyncMock,
+                return_value=mock_sandbox,
+            ) as ensure_sandbox,
+            patch(
+                "agent.server.aresolve_sandbox_work_dir",
+                new_callable=AsyncMock,
+                return_value="/workspace",
+            ),
+            patch("agent.server.make_model", return_value=MagicMock()),
+            patch("agent.server.construct_system_prompt", return_value="prompt"),
+            patch("agent.server.create_deep_agent", return_value=_DummyAgent()),
+            patch.dict("os.environ", {"SANDBOX_TYPE": "modal"}),
+        ):
+            from agent.server import get_agent
+
+            await get_agent(config)
+
+        ensure_sandbox.assert_awaited_once_with(
+            "thread-123",
+            github_proxy_repositories=["open-swe"],
+            repo={"owner": "langchain-ai", "name": "open-swe"},
+        )
 
     @pytest.mark.asyncio
     async def test_refreshes_proxy_for_cached_langsmith_sandbox(self) -> None:
@@ -440,8 +593,32 @@ class TestRefreshProxyOnSandboxReuse:
                 "thread-123",
                 github_proxy_token=None,
                 github_proxy_repositories=None,
+                github_proxy_permissions=None,
+                github_proxy_token_refreshable=False,
                 repo=None,
             )
+
+    @pytest.mark.asyncio
+    async def test_modal_refresh_clears_old_token_when_repo_scoped_mint_fails(self) -> None:
+        backend = MagicMock(id="sandbox-modal")
+        with (
+            patch(
+                "agent.server.get_github_app_installation_token_with_expiry",
+                new_callable=AsyncMock,
+                return_value=(None, None),
+            ),
+            patch.dict("os.environ", {"SANDBOX_TYPE": "modal"}),
+        ):
+            from agent.server import _refresh_github_proxy
+
+            with pytest.raises(ValueError, match="repository scope \\[nas-reporting\\]"):
+                await _refresh_github_proxy(
+                    backend,
+                    thread_id="thread-123",
+                    github_proxy_repositories=["nas-reporting"],
+                )
+
+        backend.set_github_token.assert_called_once_with(None)
 
     @pytest.mark.asyncio
     async def test_starts_stopped_langsmith_sandbox_before_proxy_refresh(self) -> None:

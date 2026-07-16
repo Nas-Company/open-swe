@@ -30,7 +30,7 @@ The current `custom_prompt` is the starting point — you are editing it, not re
 from scratch. Read it (it is summarized for you / available via the dashboard record).
 Keep what still holds, strengthen rules the outcomes confirm, and remove or soften rules
 the outcomes contradict. Optionally do a **light** `gh` top-up
-(`GH_TOKEN=dummy gh ...`) to confirm a pattern, but outcomes are the primary signal — do
+(`GH_TOKEN="${GH_TOKEN:-dummy}" gh ...`) to confirm a pattern, but outcomes are the primary signal — do
 not re-run a full PR crawl.
 
 Stay aligned with the reviewer-agent themes in the system prompt.

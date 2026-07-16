@@ -9,7 +9,7 @@ import type {
   SidebarThreads,
   ThreadsPageParams,
 } from "./api"
-import type { AgentThread, Chunk, ImageChunk, Message } from "./types"
+import type { AgentThread, Chunk, FileChunk, ImageChunk, Message } from "./types"
 
 export const agentThreadKeys = {
   lists: ["agent-threads", "lists"] as const,
@@ -169,6 +169,7 @@ export function useDeleteAgentSchedule() {
 export interface CreateAgentThreadVariables {
   prompt: string
   images?: Array<ImageChunk>
+  files?: Array<FileChunk>
   repo?: string | null
   repo_explicitly_none?: boolean
   model_id?: string | null
@@ -193,6 +194,7 @@ export function optimisticThread(
   const repoFullName = vars.repo ?? ""
   const chunks: Array<Chunk> = [
     ...(vars.images ?? []),
+    ...(vars.files ?? []),
     ...(text ? [{ kind: "text", text } satisfies Chunk] : []),
   ]
   const message: Message = {
@@ -225,6 +227,7 @@ export function optimisticThread(
 export interface SendAgentMessageVariables {
   content: string
   images?: Array<ImageChunk>
+  files?: Array<FileChunk>
   model_id?: string | null
   effort?: string | null
   plan_mode?: boolean

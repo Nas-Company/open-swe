@@ -25,13 +25,14 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-# One shell command that does the whole git workflow. Each execute() runs in a
-# fresh shell rooted at the sandbox dir, so the clone+commit+push is bundled.
+# Set up and commit separately from the push. Production accepts pushes only as
+# standalone commands so the middleware can pin and inspect the exact refspec.
 _IMPLEMENT_SCRIPT = f"""
 set -e
 rm -rf repo
 git clone "$E2E_REMOTE" repo
 cd repo
+git config url."$E2E_REMOTE".insteadOf "https://github.com/{OWNER}/{REPO}.git"
 git config user.email "dev@example.com"
 git config user.name "Dev User"
 git checkout -b {FEATURE_BRANCH}
@@ -41,9 +42,9 @@ def greet(name):
 EOF
 git add -A
 git commit -m "{PR_TITLE}"
-git push origin {FEATURE_BRANCH}
-echo PUSHED_OK
 """.strip()
+
+_PUSH_SCRIPT = f"cd repo && git push origin {FEATURE_BRANCH}"
 
 
 _PLAN_URL_RE = re.compile(r"https?://[^\s\"'<>)\]|]+/plan\b")
@@ -116,6 +117,13 @@ def _step_open_pr(_messages: list[BaseMessage]) -> AIMessage:
                 "id": "call-pr",
             }
         ],
+    )
+
+
+def _step_push(_messages: list[BaseMessage]) -> AIMessage:
+    return AIMessage(
+        content="Pushing the committed branch.",
+        tool_calls=[{"name": "execute", "args": {"command": _PUSH_SCRIPT}, "id": "call-push"}],
     )
 
 
@@ -245,7 +253,7 @@ def _step_followup(messages: list[BaseMessage]) -> AIMessage:
 
 
 def build_script() -> list[Any]:
-    return [_step_implement, _step_open_pr, _step_reply]
+    return [_step_implement, _step_push, _step_open_pr, _step_reply]
 
 
 def build_followup_script() -> list[Any]:
