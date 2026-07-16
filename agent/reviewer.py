@@ -39,6 +39,7 @@ from .dashboard.team_settings import (
     get_team_default_model_pair,
 )
 from .middleware import (
+    CodexProxyToolImageMiddleware,
     RepairOrphanedToolCallsMiddleware,
     SanitizeThinkingBlocksMiddleware,
     SanitizeToolInputsMiddleware,
@@ -1229,6 +1230,7 @@ async def get_reviewer_agent(config: RunnableConfig) -> Pregel:
             refresh_github_proxy_before_model,
             check_message_queue_before_model,
             SlackAssistantStatusMiddleware(),
+            CodexProxyToolImageMiddleware(),
             SanitizeThinkingBlocksMiddleware(),
             RepairOrphanedToolCallsMiddleware(),
             settle_review_check_on_exit,

@@ -1,4 +1,5 @@
 from .check_message_queue import check_message_queue_before_model
+from .codex_proxy_tool_images import CodexProxyToolImageMiddleware
 from .ensure_no_empty_msg import ensure_no_empty_msg
 from .exclude_tools import ExcludeToolsMiddleware
 from .model_fallback import ModelFallbackMiddleware
@@ -18,6 +19,7 @@ from .workflow_push_guard import WorkflowPushGuardMiddleware
 
 __all__ = [
     "ExcludeToolsMiddleware",
+    "CodexProxyToolImageMiddleware",
     "ModelFallbackMiddleware",
     "PlanModeMiddleware",
     "RepairOrphanedToolCallsMiddleware",

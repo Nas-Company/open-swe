@@ -30,6 +30,13 @@ def test_provider_fallback_resolves_openai_within_provider() -> None:
     assert effort == "low"
 
 
+def test_provider_fallback_upgrades_stored_gpt_55_to_sol() -> None:
+    assert provider_fallback_pair("openai:gpt-5.5", "medium") == (
+        "openai:gpt-5.6-sol",
+        "medium",
+    )
+
+
 @pytest.mark.parametrize("model_id", ["unknown:model", "no-colon", "", None, 123])
 def test_provider_fallback_returns_none_without_provider_match(model_id: object) -> None:
     assert provider_fallback_pair(model_id, "high") is None
@@ -84,6 +91,6 @@ def test_global_default_is_supported() -> None:
 
 def test_only_codex_proxy_gpt_and_minimax_are_exposed() -> None:
     assert [(m["id"], m["label"], m["default_effort"]) for m in SUPPORTED_MODELS] == [
-        ("openai:gpt-5.5", "Codex Proxy GPT-5.5", "medium"),
+        ("openai:gpt-5.6-sol", "Codex Proxy GPT-5.6 SOL", "medium"),
         ("anthropic:claude-opus-4-8", "MiniMax", "high"),
     ]

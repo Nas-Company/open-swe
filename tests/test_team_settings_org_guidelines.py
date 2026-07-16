@@ -14,7 +14,7 @@ from agent.dashboard.team_settings import (
     get_team_review_tracing_project,
 )
 
-_AGENT_PAIR = ("openai:gpt-5.5", "medium")
+_AGENT_PAIR = ("openai:gpt-5.6-sol", "medium")
 _CHAT_PAIR = ("anthropic:claude-opus-4-8", "high")
 
 
