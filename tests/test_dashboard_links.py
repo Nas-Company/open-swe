@@ -22,3 +22,14 @@ def test_dashboard_review_url_requires_fields(monkeypatch) -> None:
     importlib.reload(dashboard_links)
     assert dashboard_links.dashboard_review_url("", "repo", 1) is None
     assert dashboard_links.dashboard_review_url("owner", "repo", 0) is None
+
+
+def test_dashboard_artifact_download_url_escapes_segments(monkeypatch) -> None:
+    monkeypatch.setenv("DASHBOARD_BASE_URL", "https://example.com")
+    importlib.reload(dashboard_links)
+
+    url = dashboard_links.dashboard_artifact_download_url("thread/id", "artifact id")
+
+    assert url == (
+        "https://example.com/dashboard/api/threads/thread%2Fid/artifacts/artifact%20id/download"
+    )

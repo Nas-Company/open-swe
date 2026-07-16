@@ -1,4 +1,11 @@
-import type { AgentSchedule, AgentThread, FileChunk, ImageChunk, Message } from "./types"
+import type {
+  AgentSchedule,
+  AgentThread,
+  FileChunk,
+  ImageChunk,
+  Message,
+  ThreadArtifact,
+} from "./types"
 
 export type { AgentSchedule, AgentThread, Message }
 
@@ -69,6 +76,10 @@ export interface ThreadRecoveryPatch {
   filename: string
 }
 
+export interface ThreadArtifactsResponse {
+  artifacts: Array<ThreadArtifact>
+}
+
 export interface ThreadsPageParams {
   limit?: number
   offset?: number
@@ -137,14 +148,26 @@ async function agentsRequest<T>(
 }
 
 function filenameFromContentDisposition(value: string | null): string | null {
+  const encodedMatch = /filename\*=UTF-8''([^;]+)/i.exec(value ?? "")
+  if (encodedMatch?.[1]) {
+    try {
+      return decodeURIComponent(encodedMatch[1].trim())
+    } catch {
+      // Fall through to the quoted ASCII filename.
+    }
+  }
   const match = /filename="([^"]+)"/.exec(value ?? "")
   return match?.[1] ?? null
 }
 
-async function agentsBlobRequest(path: string): Promise<ThreadRecoveryPatch> {
+async function agentsBlobRequest(
+  path: string,
+  fallbackFilename: string,
+  accept = "application/octet-stream"
+): Promise<ThreadRecoveryPatch> {
   const res = await fetch(`${API_BASE}/dashboard/api${path}`, {
     credentials: "include",
-    headers: { Accept: "text/x-diff" },
+    headers: { Accept: accept },
   })
   if (!res.ok) {
     let message = res.statusText
@@ -165,7 +188,7 @@ async function agentsBlobRequest(path: string): Promise<ThreadRecoveryPatch> {
     blob: await res.blob(),
     filename:
       filenameFromContentDisposition(res.headers.get("content-disposition")) ??
-      "open-swe-recovery.patch",
+      fallbackFilename,
   }
 }
 
@@ -270,7 +293,22 @@ export const agentsApi = {
     ),
   downloadThreadRecoveryPatch: (threadId: string) =>
     agentsBlobRequest(
-      `/threads/${encodeURIComponent(threadId)}/recovery.patch`
+      `/threads/${encodeURIComponent(threadId)}/recovery.patch`,
+      "open-swe-recovery.patch",
+      "text/x-diff"
+    ),
+  listThreadArtifacts: (threadId: string) =>
+    agentsRequest<ThreadArtifactsResponse>(
+      `/threads/${encodeURIComponent(threadId)}/artifacts`
+    ),
+  downloadThreadArtifact: (
+    threadId: string,
+    artifactId: string,
+    fallbackFilename: string
+  ) =>
+    agentsBlobRequest(
+      `/threads/${encodeURIComponent(threadId)}/artifacts/${encodeURIComponent(artifactId)}/download`,
+      fallbackFilename
     ),
   streamUrl: (threadId: string) =>
     `${API_BASE}/dashboard/api/threads/${encodeURIComponent(threadId)}/stream`,

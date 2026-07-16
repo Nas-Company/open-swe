@@ -238,6 +238,18 @@ For tasks that create or change HTML, reports, web pages, or other browser-rende
 Only claim visual QA is complete when the final desktop and mobile image set has no remaining visible findings and the independent browser diagnostics pass."""
 
 
+ARTIFACT_DELIVERY_SECTION = """---
+
+### Delivering Generated Files
+
+Sandbox files are temporary and a `sandbox:` path is not a user-facing delivery mechanism. After all validation and visual QA is complete, call `publish_artifact` once for every final file the user should receive. Use the authenticated download URL returned by the tool in your final response.
+
+- Publish only final deliverables you created for the user, such as a completed HTML report, PDF, document, or archive.
+- Do not publish source inputs, credentials, dotfiles, logs, intermediate builds, or QA screenshots unless the user explicitly requested those files.
+- If publishing fails, fix the stated problem and retry only after the final file is valid. Never claim a temporary sandbox path will remain downloadable.
+- Files are retained for 30 days, with a maximum of 20 MiB per file, 10 files per task, and 50 MiB total per task."""
+
+
 EXTERNAL_UNTRUSTED_COMMENTS_SECTION = f"""---
 
 ### External Untrusted Comments
@@ -353,6 +365,7 @@ SYSTEM_PROMPT_TEMPLATE = (
     + "{live_issue_prompt_section}"
     + DEPENDENCY_SECTION
     + VISUAL_QA_SECTION
+    + ARTIFACT_DELIVERY_SECTION
     + EXTERNAL_UNTRUSTED_COMMENTS_SECTION
     + COMMIT_PR_SECTION
     + "{pr_policy_override_section}"

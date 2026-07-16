@@ -16,11 +16,13 @@ import {
   AgentThreadStreamProvider,
   useAgentRunStartConfirmation,
 } from "./AgentThreadStreamProvider"
+import { agentThreadKeys } from "./queries"
 import type { ReactNode } from "react"
 
 interface CapturedStreamProviderProps {
   children: ReactNode
   onCreated?: (info: { runId: string }) => void
+  onCompleted?: () => void
 }
 
 const captured = vi.hoisted(() => ({
@@ -67,13 +69,14 @@ function renderHarness(
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
-  return render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       <AgentThreadStreamProvider threadId="thread-1">
         <ConfirmationHarness start={start} />
       </AgentThreadStreamProvider>
     </QueryClientProvider>
   )
+  return { ...rendered, queryClient }
 }
 
 describe("AgentThreadStreamProvider run-start confirmation", () => {
@@ -107,5 +110,18 @@ describe("AgentThreadStreamProvider run-start confirmation", () => {
     act(() => reportError?.(new Error("dispatch failed")))
 
     await screen.findByText("failed")
+  })
+
+  it("invalidates generated files when a run completes", () => {
+    const { queryClient } = renderHarness(
+      () => new Promise<void>(() => undefined)
+    )
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries")
+
+    act(() => captured.streamProviderProps?.onCompleted?.())
+
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: agentThreadKeys.artifacts("thread-1"),
+    })
   })
 })

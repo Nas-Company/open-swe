@@ -26,6 +26,17 @@ def dashboard_plan_url(thread_id: str) -> str | None:
     return f"{base_url}/agents/{quote(thread_id, safe='')}/plan"
 
 
+def dashboard_artifact_download_url(thread_id: str, artifact_id: str) -> str | None:
+    """Build an authenticated dashboard artifact download URL."""
+    base_url = _dashboard_base_url()
+    if not base_url or not thread_id or not artifact_id:
+        return None
+    return (
+        f"{base_url}/dashboard/api/threads/{quote(thread_id, safe='')}/artifacts/"
+        f"{quote(artifact_id, safe='')}/download"
+    )
+
+
 def dashboard_review_url(owner: str, repo: str, pr_number: int) -> str | None:
     """Build the dashboard review-detail URL for a PR."""
     base_url = _dashboard_base_url()

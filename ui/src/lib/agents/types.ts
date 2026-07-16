@@ -184,6 +184,17 @@ export interface AgentSchedule {
   updatedAt?: string | null
 }
 
+export interface ThreadArtifact {
+  id: string
+  fileName: string
+  mimeType: string
+  sizeBytes: number
+  sha256: string
+  createdAt: string
+  expiresAt: string
+  downloadUrl?: string | null
+}
+
 export interface AgentThread {
   id: string
   title: string

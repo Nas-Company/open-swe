@@ -165,6 +165,9 @@ export function AgentThreadStreamProvider({
       void queryClient.invalidateQueries({
         queryKey: agentThreadKeys.detail(id),
       })
+      void queryClient.invalidateQueries({
+        queryKey: agentThreadKeys.artifacts(id),
+      })
     }
     invalidateAgentThreadLists(queryClient)
   }, [queryClient])

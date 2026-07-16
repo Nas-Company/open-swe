@@ -22,7 +22,11 @@ import type { AgentThread, Message } from "@/lib/agents/types"
 import type { ThreadPrDiffFile } from "@/lib/agents/api"
 import type { ChangedFileSummaryItem } from "@/components/agents/messages"
 import { agentsApi } from "@/lib/agents/api"
-import { useAgentThreadPrDiff } from "@/lib/agents/queries"
+import {
+  useAgentThreadArtifacts,
+  useAgentThreadPrDiff,
+} from "@/lib/agents/queries"
+import { AgentArtifactsPanel } from "@/components/agents/AgentArtifactsPanel"
 import { ReviewTab } from "@/components/agents/ReviewTab"
 import { PrHeader } from "@/components/agents/PrHeader"
 import { buttonVariants } from "@/components/ui/button"
@@ -42,6 +46,7 @@ import { cn } from "@/lib/utils"
 interface AgentGitPanelProps {
   thread: AgentThread
   messages: Array<Message>
+  isStreaming: boolean
   collapsed: boolean
   onCollapsedChange: (next: boolean) => void
 }
@@ -280,10 +285,13 @@ export function treeThemeStyle(): React.CSSProperties {
 export function AgentGitPanel({
   thread,
   messages,
+  isStreaming,
   collapsed,
   onCollapsedChange,
 }: AgentGitPanelProps) {
-  const [topTab, setTopTab] = useState<"git" | "desktop" | "terminal">("git")
+  const [topTab, setTopTab] = useState<
+    "git" | "files" | "desktop" | "terminal"
+  >("git")
   const [tab, setTab] = useState<"diff" | "review" | "commits">("diff")
   const [width, setWidthState] = useState(() => readStoredPanelWidth())
   const [fullScreen, setFullScreen] = useState(false)
@@ -320,6 +328,33 @@ export function AgentGitPanel({
     [applyWidth]
   )
 
+  const onWorkspaceTabKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+        return
+      }
+      const tabs = Array.from(
+        event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+          '[role="tab"]'
+        ) ?? []
+      )
+      if (tabs.length === 0) return
+      const currentIndex = tabs.indexOf(event.currentTarget)
+      const nextIndex =
+        event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? tabs.length - 1
+            : event.key === "ArrowRight"
+              ? (currentIndex + 1) % tabs.length
+              : (currentIndex - 1 + tabs.length) % tabs.length
+      event.preventDefault()
+      tabs[nextIndex]?.focus()
+      tabs[nextIndex]?.click()
+    },
+    []
+  )
+
   // Re-clamp against the real container width on mount and whenever the window
   // resizes, so the panel can never squeeze the chat below its minimum width.
   useEffect(() => {
@@ -346,6 +381,38 @@ export function AgentGitPanel({
   }
 
   const prDiff = useAgentThreadPrDiff(thread.id, Boolean(pr))
+  const artifactsQuery = useAgentThreadArtifacts(thread.id, isStreaming)
+  const artifacts = artifactsQuery.data?.artifacts ?? []
+  const artifactCount = artifacts.length
+  const artifactCountLabel = artifactCount > 99 ? "99+" : String(artifactCount)
+  const artifactTrackerRef = useRef({
+    threadId: thread.id,
+    count: 0,
+    ready: false,
+  })
+
+  useEffect(() => {
+    const tracker = artifactTrackerRef.current
+    if (tracker.threadId !== thread.id) {
+      artifactTrackerRef.current = {
+        threadId: thread.id,
+        count: artifactCount,
+        ready: !artifactsQuery.isLoading,
+      }
+      return
+    }
+    if (artifactsQuery.isLoading) return
+    if (tracker.ready && artifactCount > tracker.count) {
+      setTopTab("files")
+      setCollapsed(false)
+    }
+    artifactTrackerRef.current = {
+      threadId: thread.id,
+      count: artifactCount,
+      ready: true,
+    }
+  }, [artifactCount, artifactsQuery.isLoading, setCollapsed, thread.id])
+
   const [recoveringPatch, setRecoveringPatch] = useState(false)
   const [recoveryError, setRecoveryError] = useState<string | null>(null)
   const canDownloadRecovery =
@@ -432,15 +499,27 @@ export function AgentGitPanel({
   }, [selectedTreePath, files])
 
   if (collapsed) {
+    const panelLabel =
+      artifactCount > 0
+        ? `Expand workspace panel, ${artifactCount} generated ${artifactCount === 1 ? "file" : "files"}`
+        : "Expand workspace panel"
     return (
       <button
         type="button"
         onClick={() => setCollapsed(false)}
-        aria-label="Expand git panel"
-        title="Expand git panel"
+        aria-label={panelLabel}
+        title={panelLabel}
         className="fixed top-3 right-3 z-30 flex size-7 items-center justify-center rounded-md border border-border bg-background text-muted-foreground shadow-sm hover:bg-accent hover:text-foreground"
       >
         <SidebarSimpleIcon className="size-4" />
+        {artifactCount > 0 && (
+          <span
+            aria-hidden="true"
+            className="absolute -top-1.5 -left-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--ui-accent)] px-1 text-[9px] leading-none font-medium text-[var(--ui-surface)] shadow-sm"
+          >
+            {artifactCountLabel}
+          </span>
+        )}
       </button>
     )
   }
@@ -455,35 +534,56 @@ export function AgentGitPanel({
       style={overlay ? { zIndex: Z.MODAL } : { width }}
     >
       <div className="flex h-11 shrink-0 items-center gap-1 px-3">
-        {(
-          [
-            ["git", "Git"],
-            ["desktop", "Desktop"],
-            ["terminal", "Terminal"],
-          ] as const
-        ).map(([id, label]) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => setTopTab(id)}
-            className={cn(
-              "rounded-md px-2.5 py-1 text-xs transition-colors",
-              topTab === id
-                ? "bg-[var(--ui-accent-bubble)] font-medium text-[var(--ui-text)]"
-                : "text-[var(--ui-text-dim)] hover:bg-[var(--ui-panel-2)]"
-            )}
-          >
-            {label}
-          </button>
-        ))}
+        <div
+          role="tablist"
+          aria-label="Workspace views"
+          className="flex min-w-0 flex-1 [scrollbar-width:none] items-center gap-1 overflow-x-auto [&::-webkit-scrollbar]:hidden"
+        >
+          {(
+            [
+              ["git", "Git"],
+              ["files", "Files"],
+              ["desktop", "Desktop"],
+              ["terminal", "Terminal"],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              id={`workspace-tab-${id}`}
+              type="button"
+              role="tab"
+              aria-selected={topTab === id}
+              aria-controls="workspace-panel-content"
+              tabIndex={topTab === id ? 0 : -1}
+              onClick={() => setTopTab(id)}
+              onKeyDown={onWorkspaceTabKeyDown}
+              className={cn(
+                "flex shrink-0 items-center gap-1 rounded-md px-2.5 py-1 text-xs transition-colors",
+                topTab === id
+                  ? "bg-[var(--ui-accent-bubble)] font-medium text-[var(--ui-text)]"
+                  : "text-[var(--ui-text-dim)] hover:bg-[var(--ui-panel-2)]"
+              )}
+            >
+              {label}
+              {id === "files" && artifactCount > 0 && (
+                <span
+                  aria-hidden="true"
+                  className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--ui-panel-2)] px-1 text-[9px] leading-none text-[var(--ui-text-muted)]"
+                >
+                  {artifactCountLabel}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
         <button
           type="button"
           onClick={() => {
             setFullScreen(false)
             setCollapsed(true)
           }}
-          aria-label="Collapse git panel"
-          title="Collapse git panel"
+          aria-label="Collapse workspace panel"
+          title="Collapse workspace panel"
           className="ml-auto rounded-md p-1.5 text-[var(--ui-text-dim)] transition-colors hover:bg-[var(--ui-panel-2)] hover:text-[var(--ui-text)]"
         >
           <SidebarSimpleIcon className="size-4" />
@@ -505,12 +605,29 @@ export function AgentGitPanel({
       </div>
 
       <div
+        id="workspace-panel-content"
+        role="tabpanel"
+        aria-labelledby={`workspace-tab-${topTab}`}
         className={cn(
           "flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--ui-border)] bg-[var(--ui-surface)] shadow-sm",
           overlay ? "mx-3 mb-3" : "mr-4 mb-4 ml-1"
         )}
       >
-        {topTab !== "git" ? (
+        {topTab === "files" ? (
+          <AgentArtifactsPanel
+            threadId={thread.id}
+            artifacts={artifacts}
+            isLoading={artifactsQuery.isLoading}
+            loadError={
+              artifactsQuery.error instanceof Error
+                ? artifactsQuery.error.message
+                : artifactsQuery.isError
+                  ? "Failed to load generated files"
+                  : null
+            }
+            onRetryLoad={() => void artifactsQuery.refetch()}
+          />
+        ) : topTab !== "git" ? (
           <div className="flex flex-1 items-center justify-center p-6 text-xs text-[var(--ui-text-dim)]">
             Coming Soon
           </div>

@@ -33,6 +33,14 @@ from ..utils.thread_ops import (
     queue_message_for_thread,
 )
 from .agent_overrides import normalize_profile_overrides
+from .artifacts import (
+    ArtifactCorruptError,
+    ArtifactNotFoundError,
+    artifact_to_api,
+    delete_thread_artifacts,
+    list_thread_artifacts,
+    read_thread_artifact,
+)
 from .options import SUPPORTED_MODEL_IDS, model_supports_effort, model_supports_images
 from .pr_diff import build_pr_diff_files
 from .profiles import get_profile, get_valid_access_token
@@ -1490,6 +1498,43 @@ async def delete_dashboard_thread(thread_id: str, login: str, *, email: str | No
             logger.debug("Could not cancel run %s for thread %s", run_id, thread_id, exc_info=True)
 
     await client.threads.delete(thread_id)
+    try:
+        await delete_thread_artifacts(thread_id)
+    except Exception:
+        logger.warning("Could not delete artifacts for thread %s", thread_id, exc_info=True)
+
+
+async def list_dashboard_thread_artifacts(
+    thread_id: str, login: str, *, email: str | None = None
+) -> dict[str, Any]:
+    await _readable_thread(thread_id, login=login, email=email)
+    try:
+        artifacts = await list_thread_artifacts(thread_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not list artifacts for thread %s", thread_id, exc_info=True)
+        raise HTTPException(502, "failed to load artifacts") from exc
+    return {"artifacts": [artifact_to_api(item) for item in artifacts]}
+
+
+async def get_dashboard_thread_artifact(
+    thread_id: str,
+    artifact_id: str,
+    login: str,
+    *,
+    email: str | None = None,
+) -> tuple[dict[str, Any], bytes]:
+    await _readable_thread(thread_id, login=login, email=email)
+    try:
+        return await read_thread_artifact(thread_id, artifact_id)
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(404, "artifact not found") from exc
+    except ArtifactCorruptError as exc:
+        raise HTTPException(410, "artifact is incomplete or corrupt") from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not read artifact %s for thread %s", artifact_id, thread_id, exc_info=True
+        )
+        raise HTTPException(502, "failed to load artifact") from exc
 
 
 async def resolve_dashboard_thread(

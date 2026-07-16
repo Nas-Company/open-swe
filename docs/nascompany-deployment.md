@@ -216,6 +216,22 @@ parallel tool results still precede the mirrored user message, and acknowledged
 or out-of-window screenshots are stripped from later provider requests. Visual
 read batches are capped at eight images and roughly 6 MiB of encoded payload.
 
+### Durable generated files
+
+Final user-facing files are copied out of the sandbox with the agent's
+`publish_artifact` tool and stored as chunked, checksummed records in the
+LangGraph Store. The dashboard lists them under the task's `Files` workspace
+tab and downloads them through authenticated `/dashboard/api/threads/*`
+endpoints. Downloads never reconnect to the sandbox, and HTML is always served
+as an attachment with content sniffing disabled.
+
+Artifacts are retained for 30 days without refresh-on-read. Limits are 20 MiB
+per file, 10 files per task, and 50 MiB total per task. `langgraph.json` enables
+the Store TTL sweeper but intentionally does not set a global Store default TTL,
+because OAuth credentials, profiles, and team settings share the same Store.
+Manual task deletion removes its artifacts best-effort; per-item TTL bounds any
+orphaned data left by automatic thread expiry or a partial cleanup.
+
 ## Frontend Environment
 
 Production uses same-origin dashboard API requests. In Vercel,
