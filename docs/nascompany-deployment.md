@@ -225,6 +225,14 @@ tab and downloads them through authenticated `/dashboard/api/threads/*`
 endpoints. Downloads never reconnect to the sandbox, and HTML is always served
 as an attachment with content sniffing disabled.
 
+Artifact delivery has a server-side terminal-response guard as well as the
+model-facing tool instruction. If a normal completion forgets to call the tool,
+the guard injects auditable `publish_artifact` calls for eligible paths listed
+under an explicit `Deliverables` heading or staged in the controlled
+`.open-swe/deliverables/` outbox. It does not scan the repository, and it rejects
+attachments, hidden paths, credential-like names, symlinks, paths outside the
+sandbox workspace, and non-deliverable source extensions.
+
 Artifacts are retained for 30 days without refresh-on-read. Limits are 20 MiB
 per file, 10 files per task, and 50 MiB total per task. `langgraph.json` enables
 the Store TTL sweeper but intentionally does not set a global Store default TTL,

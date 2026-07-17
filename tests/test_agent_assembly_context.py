@@ -101,3 +101,18 @@ async def test_agent_keeps_message_queue_and_step_limit_middleware() -> None:
     present = {type(m).__name__ for m in middleware}
     assert "check_message_queue_before_model" in present
     assert "notify_step_limit_reached" in present
+
+
+@pytest.mark.asyncio
+async def test_agent_guards_terminal_responses_with_artifact_delivery() -> None:
+    captured = await _capture_create_deep_agent_kwargs()
+    middleware = captured["middleware"]
+    assert isinstance(middleware, list)
+    names = [type(item).__name__ for item in middleware]
+
+    artifact_index = names.index("ArtifactDeliveryMiddleware")
+    ensure_index = names.index("ensure_no_empty_msg")
+
+    # after_model hooks execute in reverse registration order, so artifact
+    # delivery must see the raw terminal response before ensure_no_empty_msg.
+    assert artifact_index > ensure_index

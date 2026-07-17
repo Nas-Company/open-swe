@@ -215,6 +215,54 @@ async def test_publish_from_sandbox_rejects_file_changed_during_download(
         )
 
 
+@pytest.mark.parametrize(
+    "file_path",
+    [
+        ".open-swe/attachments/source.md",
+        ".open-swe/deliverables/.credentials.json",
+        ".open-swe/deliverables/.private/report.html",
+        ".git/config.json",
+        ".env.production",
+        "output/credentials.json",
+    ],
+)
+async def test_publish_from_sandbox_rejects_sensitive_paths_before_read(
+    monkeypatch: pytest.MonkeyPatch,
+    file_path: str,
+) -> None:
+    backend = FakeBackend([])
+    _patch_backend(monkeypatch, backend)
+
+    with pytest.raises(ValueError, match="credential and hidden configuration"):
+        await publish_artifact_module._publish_from_sandbox(
+            "thread-1", file_path=file_path, file_name=None
+        )
+
+    assert backend.execute_calls == []
+
+
+async def test_publish_from_sandbox_allows_controlled_delivery_outbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = b"<html>done</html>"
+    path = "/workspace/.open-swe/deliverables/report.html"
+    backend = FakeBackend(_chunk_responses(path, content, 512 * 1024))
+    _patch_backend(monkeypatch, backend)
+
+    async def fake_publish(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"id": "a" * 32}
+
+    monkeypatch.setattr(publish_artifact_module, "publish_thread_artifact", fake_publish)
+
+    manifest = await publish_artifact_module._publish_from_sandbox(
+        "thread-1",
+        file_path=".open-swe/deliverables/report.html",
+        file_name=None,
+    )
+
+    assert manifest == {"id": "a" * 32}
+
+
 async def test_publish_from_sandbox_rejects_chunk_checksum_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

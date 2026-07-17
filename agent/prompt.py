@@ -244,6 +244,8 @@ ARTIFACT_DELIVERY_SECTION = """---
 
 Sandbox files are temporary and a `sandbox:` path is not a user-facing delivery mechanism. After all validation and visual QA is complete, call `publish_artifact` once for every final file the user should receive. Use the authenticated download URL returned by the tool in your final response.
 
+For delivery reliability, also list every final deliverable's exact path in backticks under a `Deliverables` heading. You may stage final copies in `.open-swe/deliverables/` relative to the sandbox workspace. A server-side completion guard will publish eligible files from that controlled outbox or from the explicit final path list if a terminal response accidentally omits the tool call.
+
 - Publish only final deliverables you created for the user, such as a completed HTML report, PDF, document, or archive.
 - Do not publish source inputs, credentials, dotfiles, logs, intermediate builds, or QA screenshots unless the user explicitly requested those files.
 - If publishing fails, fix the stated problem and retry only after the final file is valid. Never claim a temporary sandbox path will remain downloadable.

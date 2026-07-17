@@ -5,6 +5,7 @@
 # ruff: noqa: E402
 import logging
 import os
+import posixpath
 import time
 import warnings
 from collections.abc import Sequence
@@ -54,6 +55,7 @@ from .integrations.langsmith_tools import load_langsmith_tools
 from .integrations.live_issue_mcp import load_live_issue_tools
 from .integrations.notion_mcp import load_notion_tools
 from .middleware import (
+    ArtifactDeliveryMiddleware,
     CodexProxyToolImageMiddleware,
     ModelFallbackMiddleware,
     PlanModeMiddleware,
@@ -797,6 +799,11 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     linear_issue_number = linear_issue.get("linear_issue_number", "")
 
     work_dir = await aresolve_sandbox_work_dir(sandbox_backend)
+    repo_dir = (
+        posixpath.join(work_dir, prompt_default_repo["name"])
+        if prompt_default_repo is not None
+        else work_dir
+    )
 
     def backend_factory(_runtime: object, _thread_id: str = thread_id) -> SandboxBackendProtocol:
         return _get_cached_sandbox_backend(_thread_id)
@@ -999,6 +1006,11 @@ async def get_agent(config: RunnableConfig) -> Pregel:
             TextFileAttachmentMiddleware(),
             SlackAssistantStatusMiddleware(),
             ensure_no_empty_msg,
+            ArtifactDeliveryMiddleware(
+                work_dir=work_dir,
+                repo_dir=repo_dir,
+                sandbox_backend=sandbox_backend,
+            ),
             notify_step_limit_reached,
             SandboxCircuitBreakerMiddleware(),
             *fallback_middleware,

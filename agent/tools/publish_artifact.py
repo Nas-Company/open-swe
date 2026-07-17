@@ -9,6 +9,7 @@ import json
 import logging
 import posixpath
 import shlex
+from pathlib import PurePosixPath
 from typing import Any
 
 from langgraph.config import get_config
@@ -120,6 +121,31 @@ _BLOCKED_NAMES = frozenset(
         "id_rsa",
     }
 )
+_BLOCKED_PATH_PARTS = frozenset(
+    {
+        ".aws",
+        ".config",
+        ".git",
+        ".gnupg",
+        ".kube",
+        ".ssh",
+    }
+)
+_BLOCKED_FILENAME_STEMS = frozenset(
+    {
+        "application_default_credentials",
+        "credential",
+        "credentials",
+        "private-key",
+        "private_key",
+        "secret",
+        "secrets",
+        "service-account",
+        "service_account",
+        "token",
+        "tokens",
+    }
+)
 
 
 async def publish_artifact(file_path: str, file_name: str | None = None) -> dict[str, Any]:
@@ -171,14 +197,13 @@ async def _publish_from_sandbox(
 
     backend = await get_sandbox_backend(thread_id)
     work_dir = await aresolve_sandbox_work_dir(backend)
+    _validate_artifact_source_path(file_path, work_dir=work_dir)
     content, resolved_path = await _read_bounded_sandbox_file(
         backend,
         file_path=file_path,
         work_dir=work_dir,
     )
-    blocked_name = posixpath.basename(resolved_path).lower()
-    if blocked_name in _BLOCKED_NAMES or blocked_name.startswith(".env."):
-        raise ValueError("credential and hidden configuration files cannot be published")
+    _validate_artifact_source_path(resolved_path, work_dir=work_dir)
 
     return await publish_thread_artifact(
         thread_id,
@@ -186,6 +211,39 @@ async def _publish_from_sandbox(
         content=content,
         display_name=file_name,
     )
+
+
+def _validate_artifact_source_path(file_path: str, *, work_dir: str) -> None:
+    candidate = file_path if posixpath.isabs(file_path) else posixpath.join(work_dir, file_path)
+    normalized_work_dir = posixpath.normpath(work_dir)
+    normalized_path = posixpath.normpath(candidate)
+    try:
+        common_path = posixpath.commonpath([normalized_work_dir, normalized_path])
+    except ValueError as exc:
+        raise ValueError("file must be a regular file inside the sandbox workspace") from exc
+    if common_path != normalized_work_dir:
+        raise ValueError("file must be a regular file inside the sandbox workspace")
+
+    blocked_name = posixpath.basename(normalized_path).lower()
+    relative_parts = PurePosixPath(posixpath.relpath(normalized_path, normalized_work_dir)).parts
+    blocked_stems: set[str] = set()
+    remaining_name = blocked_name
+    while "." in remaining_name:
+        remaining_name = remaining_name.rsplit(".", 1)[0]
+        blocked_stems.add(remaining_name)
+    blocked_stems.add(remaining_name)
+    is_attachment = relative_parts[:2] == (".open-swe", "attachments")
+    is_outbox = relative_parts[:2] == (".open-swe", "deliverables")
+    artifact_parts = relative_parts[2:] if is_outbox else relative_parts
+    if (
+        blocked_name in _BLOCKED_NAMES
+        or blocked_name.startswith(".env")
+        or is_attachment
+        or any(part.startswith(".") for part in artifact_parts)
+        or any(part.casefold() in _BLOCKED_PATH_PARTS for part in relative_parts)
+        or bool(blocked_stems & _BLOCKED_FILENAME_STEMS)
+    ):
+        raise ValueError("credential and hidden configuration files cannot be published")
 
 
 async def _read_bounded_sandbox_file(
