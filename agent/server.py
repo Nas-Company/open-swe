@@ -113,6 +113,7 @@ from .utils.model import (
     make_model,
     provider_model_kwargs,
 )
+from .utils.nas_skills import materialize_nas_skills
 from .utils.sandbox import create_sandbox
 from .utils.sandbox_errors import is_retryable_sandbox_connection_error
 from .utils.sandbox_paths import aresolve_sandbox_work_dir
@@ -799,6 +800,11 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     linear_issue_number = linear_issue.get("linear_issue_number", "")
 
     work_dir = await aresolve_sandbox_work_dir(sandbox_backend)
+    try:
+        nas_skill_sources = await materialize_nas_skills(sandbox_backend, work_dir)
+    except Exception:
+        logger.warning("Failed to materialize NAS skills", exc_info=True)
+        nas_skill_sources = []
     repo_dir = (
         posixpath.join(work_dir, prompt_default_repo["name"])
         if prompt_default_repo is not None
@@ -994,6 +1000,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
             *notion_tools,
         ],
         subagents=[_general_purpose_subagent(subagent_model)],
+        skills=nas_skill_sources or None,
         backend=backend_factory,
         middleware=[
             SanitizeToolInputsMiddleware(),
