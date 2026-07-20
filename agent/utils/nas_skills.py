@@ -3,11 +3,18 @@ from __future__ import annotations
 import hashlib
 import posixpath
 from pathlib import Path
+from typing import Any
 
 from deepagents.backends.protocol import SandboxBackendProtocol
 
 BUNDLED_SKILLS_DIR = Path(__file__).resolve().parent.parent / "nas_skills"
 SANDBOX_SKILLS_DIR = ".open-swe/skills"
+
+
+def _response_value(response: Any, field: str) -> Any:
+    if isinstance(response, dict):
+        return response.get(field)
+    return getattr(response, field, None)
 
 
 def bundled_skill_uploads(work_dir: str) -> list[tuple[str, bytes]]:
@@ -33,7 +40,14 @@ async def materialize_nas_skills(
 ) -> list[str]:
     uploads = bundled_skill_uploads(work_dir)
     responses = await backend.aupload_files(uploads)
-    errors = [f"{response.path}: {response.error}" for response in responses if response.error]
+    if len(responses) != len(uploads):
+        raise RuntimeError("Failed to materialize NAS skills: incomplete file upload response")
+    errors = []
+    for (path, _), response in zip(uploads, responses, strict=True):
+        error = _response_value(response, "error")
+        if error:
+            response_path = _response_value(response, "path") or path
+            errors.append(f"{response_path}: {error}")
     if errors:
         raise RuntimeError("Failed to materialize NAS skills: " + "; ".join(errors))
     return [posixpath.join(work_dir, SANDBOX_SKILLS_DIR) + "/"]
