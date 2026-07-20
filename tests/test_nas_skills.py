@@ -23,6 +23,18 @@ class FakeBackend:
         return [UploadResult(path=path, error=self.error) for path, _ in files]
 
 
+class FakeDictBackend(FakeBackend):
+    async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[dict[str, str | None]]:
+        self.uploads = files
+        return [{"path": path, "error": self.error} for path, _ in files]
+
+
+class FakeIncompleteBackend(FakeBackend):
+    async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[UploadResult]:
+        self.uploads = files
+        return []
+
+
 @pytest.mark.asyncio
 async def test_materialize_nas_skills_uploads_bundle_and_version_marker() -> None:
     backend = FakeBackend()
@@ -33,6 +45,19 @@ async def test_materialize_nas_skills_uploads_bundle_and_version_marker() -> Non
     assert sources == ["/workspace/.open-swe/skills/"]
     assert paths == sorted(paths)
     assert "/workspace/.open-swe/skills/.bundle-sha256" in paths
+
+
+@pytest.mark.asyncio
+async def test_materialize_nas_skills_accepts_dictionary_upload_responses() -> None:
+    sources = await materialize_nas_skills(FakeDictBackend(), "/workspace")  # type: ignore[arg-type]
+
+    assert sources == ["/workspace/.open-swe/skills/"]
+
+
+@pytest.mark.asyncio
+async def test_materialize_nas_skills_rejects_incomplete_upload_responses() -> None:
+    with pytest.raises(RuntimeError, match="incomplete file upload response"):
+        await materialize_nas_skills(FakeIncompleteBackend(), "/workspace")  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
