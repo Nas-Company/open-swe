@@ -123,15 +123,16 @@ export function AgentThreadView({ thread }: AgentThreadViewProps) {
               contentWidthClass="max-w-3xl"
             />
             <div className="shrink-0 px-4 pb-4">
-              <div className="mx-auto w-full min-w-0 max-w-3xl">
+              <div className="mx-auto w-full max-w-3xl min-w-0">
                 <AgentPromptBar
                   placeholder="Add a follow up"
                   compact
                   busy={isStreaming}
-                  onSubmit={(content, images) =>
+                  onSubmit={(content, images, files) =>
                     sendMessage.mutateAsync({
                       content,
                       images,
+                      files,
                       model_id: activeSelection?.modelId ?? null,
                       effort: activeSelection?.effort ?? null,
                       plan_mode: activePlanMode,
@@ -148,7 +149,9 @@ export function AgentThreadView({ thread }: AgentThreadViewProps) {
           </div>
         ) : isHydrating ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6">
-            <p className="text-xs text-[var(--ui-text-dim)]">Loading conversation…</p>
+            <p className="text-xs text-[var(--ui-text-dim)]">
+              Loading conversation…
+            </p>
           </div>
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6">
@@ -160,10 +163,11 @@ export function AgentThreadView({ thread }: AgentThreadViewProps) {
                 placeholder="Send the first message"
                 compact
                 busy={isStreaming}
-                onSubmit={(content, images) =>
+                onSubmit={(content, images, files) =>
                   sendMessage.mutateAsync({
                     content,
                     images,
+                    files,
                     model_id: activeSelection?.modelId ?? null,
                     effort: activeSelection?.effort ?? null,
                   })
@@ -179,6 +183,7 @@ export function AgentThreadView({ thread }: AgentThreadViewProps) {
       <AgentGitPanel
         thread={thread}
         messages={baseMessages}
+        isStreaming={isStreaming}
         collapsed={panelCollapsed}
         onCollapsedChange={handlePanelCollapsedChange}
       />

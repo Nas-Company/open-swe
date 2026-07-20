@@ -16,10 +16,16 @@ from typing import Any
 import httpx
 from fastapi import HTTPException
 from langchain_core.messages.content import create_image_block
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..utils.langsmith import get_langsmith_trace_url
 from ..utils.sandbox import create_sandbox
+from ..utils.text_file_attachments import (
+    TextFileAttachmentError,
+    canonical_text_file_block,
+    validate_attachment_encoded_size,
+    validate_text_file_blocks,
+)
 from ..utils.thread_ops import (
     get_thread_active_status,
     langgraph_client,
@@ -27,6 +33,14 @@ from ..utils.thread_ops import (
     queue_message_for_thread,
 )
 from .agent_overrides import normalize_profile_overrides
+from .artifacts import (
+    ArtifactCorruptError,
+    ArtifactNotFoundError,
+    artifact_to_api,
+    delete_thread_artifacts,
+    list_thread_artifacts,
+    read_thread_artifact,
+)
 from .options import SUPPORTED_MODEL_IDS, model_supports_effort, model_supports_images
 from .pr_diff import build_pr_diff_files
 from .profiles import get_profile, get_valid_access_token
@@ -113,9 +127,19 @@ class DashboardImageBody(BaseModel):
     file_name: str | None = Field(default=None, alias="fileName")
 
 
+class DashboardTextFileBody(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: str | None = None
+    base64: str = Field(min_length=1)
+    mime_type: str = Field(alias="mimeType", min_length=1)
+    file_name: str = Field(alias="fileName", min_length=1, max_length=255)
+
+
 class ThreadMessageBody(BaseModel):
     content: str = Field(default="", max_length=20_000)
     images: list[DashboardImageBody] = Field(default_factory=list)
+    files: list[DashboardTextFileBody] = Field(default_factory=list)
     model_id: str | None = None
     effort: str | None = None
     plan_mode: bool = False
@@ -200,18 +224,46 @@ def _image_blocks(
     ]
 
 
+def _text_file_blocks(files: list[DashboardTextFileBody]) -> list[dict[str, str]]:
+    blocks = [
+        {
+            "type": "file",
+            "base64": file.base64,
+            "mime_type": file.mime_type,
+            "file_name": file.file_name,
+        }
+        for file in files
+    ]
+    try:
+        attachments = validate_text_file_blocks(blocks)
+    except TextFileAttachmentError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return [canonical_text_file_block(attachment) for attachment in attachments]
+
+
 def _user_message_content(
-    prompt: str, images: list[DashboardImageBody], *, model_id: str | None = None
+    prompt: str,
+    images: list[DashboardImageBody],
+    *,
+    files: list[DashboardTextFileBody] | None = None,
+    model_id: str | None = None,
 ) -> str | list[dict[str, Any]]:
     text = prompt.strip()
-    if not text and not images:
-        raise HTTPException(422, "prompt or image required")
-    if not images:
+    files = files or []
+    if not text and not images and not files:
+        raise HTTPException(422, "prompt, image, or file required")
+    if not images and not files:
         return text
-    return [
+    blocks = [
         *_image_blocks(images, model_id=model_id),
+        *_text_file_blocks(files),
         *([{"type": "text", "text": text}] if text else []),
     ]
+    try:
+        validate_attachment_encoded_size(blocks)
+    except TextFileAttachmentError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return blocks
 
 
 async def _ensure_dashboard_github_token(login: str) -> None:
@@ -926,6 +978,7 @@ async def _create_dashboard_thread_record(
     repo_explicitly_none: bool = False,
     prompt: str,
     images: list[DashboardImageBody] | None = None,
+    files: list[DashboardTextFileBody] | None = None,
     title: str | None = None,
     model_id: str | None = None,
     effort: str | None = None,
@@ -939,7 +992,7 @@ async def _create_dashboard_thread_record(
     # Validate any attached images against the resolved model (raises 422 for
     # text-only models). The run itself is started client-side via the stream
     # commands endpoint, so we only need the validation side effect here.
-    _user_message_content(prompt, images or [], model_id=resolved_model)
+    _user_message_content(prompt, images or [], files=files, model_id=resolved_model)
     chosen_model, chosen_effort = _normalize_model_choice(model_id, effort)
     profile_model, profile_effort = normalize_profile_overrides(profile)
     metadata_model = chosen_model or profile_model or "Default"
@@ -1103,11 +1156,58 @@ def _dashboard_images_from_content(content: Any) -> list[DashboardImageBody]:
     return images
 
 
+def _dashboard_files_from_content(content: Any) -> list[DashboardTextFileBody]:
+    """Reconstruct typed text-file bodies from command message content blocks."""
+    if not isinstance(content, list):
+        return []
+    files: list[DashboardTextFileBody] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "file":
+            continue
+        if "data" in block:
+            raise HTTPException(422, "file attachments must use base64 only")
+        data = block.get("base64")
+        mime = block.get("mime_type") or block.get("mimeType")
+        file_name = block.get("file_name") or block.get("fileName")
+        if not all(isinstance(value, str) and value for value in (data, mime, file_name)):
+            raise HTTPException(422, "invalid file attachment")
+        try:
+            files.append(DashboardTextFileBody(base64=data, mime_type=mime, file_name=file_name))
+        except ValidationError as exc:
+            raise HTTPException(422, "invalid file attachment") from exc
+    return files
+
+
+def _canonicalize_command_file_blocks(content: Any) -> Any:
+    """Normalize accepted aliases and strip non-canonical file-block fields."""
+    if not isinstance(content, list):
+        return content
+    canonical_files = iter(_text_file_blocks(_dashboard_files_from_content(content)))
+    return [
+        next(canonical_files) if isinstance(block, dict) and block.get("type") == "file" else block
+        for block in content
+    ]
+
+
 def _validate_command_images(content: Any, *, model_id: str | None) -> None:
     """Reject images for text-only models / oversize attachments (raises 422)."""
     images = _dashboard_images_from_content(content)
     if images:
         _image_blocks(images, model_id=model_id)
+
+
+def _validate_command_files(content: Any) -> None:
+    """Reject unsafe, invalid, oversized, or non-UTF-8 text attachments."""
+    files = _dashboard_files_from_content(content)
+    if files:
+        _text_file_blocks(files)
+
+
+def _validate_command_attachment_size(content: Any) -> None:
+    try:
+        validate_attachment_encoded_size(content)
+    except TextFileAttachmentError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 async def _enrich_run_start_command(
@@ -1147,6 +1247,9 @@ async def _enrich_run_start_command(
     )
     plan_mode_requested = client_configurable.get("plan_mode") is True
     content = _command_message_content(params)
+    content = _canonicalize_command_file_blocks(content)
+    _set_command_last_message_content(params, content)
+    _validate_command_attachment_size(content)
     overrides: dict[str, Any] = {}
 
     if creating:
@@ -1163,6 +1266,7 @@ async def _enrich_run_start_command(
             repo_explicitly_none=client_configurable.get("repo_explicitly_none") is True,
             prompt=_command_prompt_text(content),
             images=_dashboard_images_from_content(content),
+            files=_dashboard_files_from_content(content),
             model_id=client_configurable.get("agent_model_id"),
             effort=client_configurable.get("agent_effort"),
             plan_mode=plan_mode_requested,
@@ -1173,6 +1277,7 @@ async def _enrich_run_start_command(
             overrides["agent_effort"] = chosen_effort
     else:
         _validate_command_images(content, model_id=chosen_model or _metadata_model_id(metadata))
+        _validate_command_files(content)
         prefix = _attribution_prefix(metadata, login, email)
         if prefix:
             _set_command_last_message_content(params, _prefix_message_content(content, prefix))
@@ -1249,13 +1354,25 @@ async def send_dashboard_message(
         )
 
     active_model = _metadata_model_id(metadata) if body.images else None
-    content = _user_message_content(prompt, body.images, model_id=active_model)
+    content = _user_message_content(
+        prompt,
+        body.images,
+        files=body.files,
+        model_id=active_model,
+    )
     await client.threads.update(thread_id=thread_id, metadata=metadata_update)
     queue_payload: dict[str, Any] = {"text": prompt, "source": _DASHBOARD_SOURCE}
     if isinstance(content, list):
-        queue_payload["images"] = [
-            block for block in content if isinstance(block, dict) and block.get("type") != "text"
+        image_blocks = [
+            block for block in content if isinstance(block, dict) and block.get("type") == "image"
         ]
+        file_blocks = [
+            block for block in content if isinstance(block, dict) and block.get("type") == "file"
+        ]
+        if image_blocks:
+            queue_payload["images"] = image_blocks
+        if file_blocks:
+            queue_payload["files"] = file_blocks
     queued = await queue_message_for_thread(thread_id, queue_payload)
     if not queued:
         raise HTTPException(502, "failed to queue follow-up message")
@@ -1280,6 +1397,7 @@ async def create_dashboard_thread_run(
         repo_explicitly_none=body.repo_explicitly_none,
         prompt=body.content,
         images=body.images,
+        files=body.files,
         model_id=body.model_id,
         effort=body.effort,
         plan_mode=body.plan_mode,
@@ -1300,6 +1418,7 @@ async def create_dashboard_thread_run(
     content = _user_message_content(
         body.content.strip(),
         body.images,
+        files=body.files,
         model_id=_metadata_model_id(metadata),
     )
     run = await client.runs.create(
@@ -1379,6 +1498,43 @@ async def delete_dashboard_thread(thread_id: str, login: str, *, email: str | No
             logger.debug("Could not cancel run %s for thread %s", run_id, thread_id, exc_info=True)
 
     await client.threads.delete(thread_id)
+    try:
+        await delete_thread_artifacts(thread_id)
+    except Exception:
+        logger.warning("Could not delete artifacts for thread %s", thread_id, exc_info=True)
+
+
+async def list_dashboard_thread_artifacts(
+    thread_id: str, login: str, *, email: str | None = None
+) -> dict[str, Any]:
+    await _readable_thread(thread_id, login=login, email=email)
+    try:
+        artifacts = await list_thread_artifacts(thread_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not list artifacts for thread %s", thread_id, exc_info=True)
+        raise HTTPException(502, "failed to load artifacts") from exc
+    return {"artifacts": [artifact_to_api(item) for item in artifacts]}
+
+
+async def get_dashboard_thread_artifact(
+    thread_id: str,
+    artifact_id: str,
+    login: str,
+    *,
+    email: str | None = None,
+) -> tuple[dict[str, Any], bytes]:
+    await _readable_thread(thread_id, login=login, email=email)
+    try:
+        return await read_thread_artifact(thread_id, artifact_id)
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(404, "artifact not found") from exc
+    except ArtifactCorruptError as exc:
+        raise HTTPException(410, "artifact is incomplete or corrupt") from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not read artifact %s for thread %s", artifact_id, thread_id, exc_info=True
+        )
+        raise HTTPException(502, "failed to load artifact") from exc
 
 
 async def resolve_dashboard_thread(

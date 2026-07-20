@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent.integrations.modal import ModalSandboxOwnershipError
 from agent.server import (
     SANDBOX_BACKENDS,
     SANDBOX_CREATING,
@@ -70,9 +71,7 @@ async def test_fresh_sandbox_creating_waits_for_other_worker() -> None:
     async def passthrough(
         sb,
         _thread_id,
-        _github_proxy_token=None,
-        _github_proxy_repositories=None,
-        _repo=None,
+        **_kwargs,
     ):
         return sb
 
@@ -102,4 +101,41 @@ async def test_fresh_sandbox_creating_waits_for_other_worker() -> None:
         assert call.kwargs["metadata"] != {"sandbox_id": None, "sandbox_creating_at": None}
 
     assert SANDBOX_CREATION_TIMEOUT > 0
+    SANDBOX_BACKENDS.clear()
+
+
+@pytest.mark.asyncio
+async def test_unowned_persisted_modal_sandbox_is_replaced_without_execution() -> None:
+    thread_id = "thread-unowned-modal-sandbox"
+    SANDBOX_BACKENDS.clear()
+    replacement = MagicMock(id="sb-open-swe-new")
+
+    with (
+        patch(
+            "agent.server.get_sandbox_id_from_metadata",
+            new_callable=AsyncMock,
+            return_value="sb-other-app",
+        ),
+        patch(
+            "agent.server.create_sandbox",
+            side_effect=ModalSandboxOwnershipError("unowned"),
+        ) as reconnect,
+        patch(
+            "agent.server._create_sandbox_with_proxy",
+            new_callable=AsyncMock,
+            return_value=replacement,
+        ) as create_replacement,
+        patch("agent.server._configure_git_identity", new_callable=AsyncMock),
+        patch("agent.server.client.threads.update", new_callable=AsyncMock) as update_thread,
+    ):
+        result = await ensure_sandbox_for_thread(thread_id)
+
+    assert result.id == "sb-open-swe-new"
+    reconnect.assert_called_once_with("sb-other-app")
+    create_replacement.assert_awaited_once()
+    assert update_thread.await_args_list[0].kwargs["metadata"]["sandbox_id"] == SANDBOX_CREATING
+    assert update_thread.await_args_list[-1].kwargs == {
+        "thread_id": thread_id,
+        "metadata": {"sandbox_id": "sb-open-swe-new"},
+    }
     SANDBOX_BACKENDS.clear()

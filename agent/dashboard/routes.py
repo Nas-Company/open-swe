@@ -28,6 +28,7 @@ from .agent_usage import (
     refresh_usage_leaderboard_cache,
 )
 from .analyzer_cron import remove_continual_cron
+from .artifacts import artifact_content_disposition
 from .enabled_repos import (
     list_enabled_review_repos,
     set_review_repo_enabled,
@@ -156,9 +157,11 @@ from .thread_api import (
     create_dashboard_thread_run,
     delete_dashboard_thread,
     get_dashboard_thread,
+    get_dashboard_thread_artifact,
     get_dashboard_thread_pr_diff,
     get_dashboard_thread_recovery_patch,
     get_dashboard_thread_state,
+    list_dashboard_thread_artifacts,
     list_dashboard_threads,
     list_dashboard_threads_page,
     list_dashboard_threads_sidebar,
@@ -1574,6 +1577,41 @@ async def api_get_thread_recovery_patch(
         content=content,
         media_type="text/x-diff",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/threads/{thread_id}/artifacts")
+async def api_list_thread_artifacts(
+    thread_id: str,
+    session: dict[str, Any] = _SESSION_DEP,
+) -> dict[str, Any]:
+    return await list_dashboard_thread_artifacts(
+        thread_id,
+        session["sub"],
+        email=session.get("email"),
+    )
+
+
+@router.get("/threads/{thread_id}/artifacts/{artifact_id}/download")
+async def api_download_thread_artifact(
+    thread_id: str,
+    artifact_id: str,
+    session: dict[str, Any] = _SESSION_DEP,
+) -> Response:
+    manifest, content = await get_dashboard_thread_artifact(
+        thread_id,
+        artifact_id,
+        session["sub"],
+        email=session.get("email"),
+    )
+    return Response(
+        content=content,
+        media_type=manifest["mime_type"],
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": artifact_content_disposition(manifest["filename"]),
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

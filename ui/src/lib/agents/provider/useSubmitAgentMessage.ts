@@ -1,26 +1,14 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useStreamContext as useAgentThreadStream } from "@langchain/react";
+import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { useStreamContext as useAgentThreadStream } from "@langchain/react"
 
-import type { SendAgentMessageVariables } from "@/lib/agents/queries";
-import { AgentsApiError, agentsApi } from "@/lib/agents/api";
-import { agentThreadKeys, invalidateAgentThreadLists } from "@/lib/agents/queries";
-
-/**
- * Construct the message content for the LangGraph run.
- *
- * @param vars - The variables for the message.
- * @returns The message content.
- */
-function messageContent(vars: SendAgentMessageVariables) {
-  const text = vars.content.trim();
-  const imageBlocks = vars.images?.map((image) => ({
-    type: "image",
-    base64: image.base64,
-    mime_type: image.mimeType,
-    ...(image.fileName ? { file_name: image.fileName } : {}),
-  })) ?? [];
-  return [...imageBlocks, ...(text ? [{ type: "text", text }] : [])];
-}
+import type { SendAgentMessageVariables } from "@/lib/agents/queries"
+import { AgentsApiError, agentsApi } from "@/lib/agents/api"
+import {
+  agentThreadKeys,
+  invalidateAgentThreadLists,
+} from "@/lib/agents/queries"
+import { buildAgentMessageContent } from "@/lib/agents/messageContent"
+import { useAgentRunStartConfirmation } from "@/lib/agents/AgentThreadStreamProvider"
 
 /**
  * User-initiated sends from the prompt bar. Prefer this over calling `stream.submit`
@@ -37,8 +25,9 @@ function messageContent(vars: SendAgentMessageVariables) {
  * @returns The mutation object.
  */
 export function useSubmitAgentMessage(threadId: string) {
-  const queryClient = useQueryClient();
-  const stream = useAgentThreadStream();
+  const queryClient = useQueryClient()
+  const stream = useAgentThreadStream()
+  const confirmRunStart = useAgentRunStartConfirmation()
 
   return useMutation({
     mutationFn: async (vars: SendAgentMessageVariables) => {
@@ -46,61 +35,74 @@ export function useSubmitAgentMessage(threadId: string) {
         agentsApi.queueMessage(threadId, {
           content: vars.content,
           images: vars.images,
+          files: vars.files,
           model_id: vars.model_id,
           effort: vars.effort,
           plan_mode: vars.plan_mode,
-        });
+        })
 
       if (stream.isLoading) {
-        await queue();
-        return;
+        await queue()
+        return
       }
 
       try {
-        await queue();
-        return;
+        await queue()
+        return
       } catch (error) {
         if (!(error instanceof AgentsApiError) || error.status !== 409) {
-          throw error;
+          throw error
         }
       }
 
-      const configurable: Record<string, unknown> = {};
+      const configurable: Record<string, unknown> = {}
       if (vars.model_id && vars.effort) {
-        configurable.agent_model_id = vars.model_id;
-        configurable.agent_effort = vars.effort;
+        configurable.agent_model_id = vars.model_id
+        configurable.agent_effort = vars.effort
       }
       if (vars.plan_mode) {
-        configurable.plan_mode = true;
+        configurable.plan_mode = true
       }
       const config =
-        Object.keys(configurable).length > 0 ? { configurable } : undefined;
+        Object.keys(configurable).length > 0 ? { configurable } : undefined
 
-      // Don't await: `stream.submit` resolves only when the run *finishes*, so
-      // awaiting would keep the mutation `isPending` (and the prompt bar
-      // disabled) for the entire run, blocking the user from queueing a
-      // follow-up while it streams.
-      void stream
-        .submit(
-          { messages: [{ type: "human", content: messageContent(vars) }] },
-          { config },
+      const markRunError = () => {
+        queryClient.setQueryData(agentThreadKeys.detail(threadId), (prev) =>
+          prev ? { ...prev, status: "error" as const } : prev
         )
-        .catch(() => {
-          // The run failed to start (e.g. expired OAuth token → 401, or a
-          // 409 active-run race), but `onSuccess` already optimistically set
-          // `status: "running"`. Surface the failure and clear the busy state
-          // instead of leaving the thread falsely running.
-          queryClient.setQueryData(agentThreadKeys.detail(threadId), (prev) =>
-            prev ? { ...prev, status: "error" as const } : prev,
-          );
-          invalidateAgentThreadLists(queryClient);
-        });
+        invalidateAgentThreadLists(queryClient)
+      }
+
+      // `stream.submit` resolves only when the run finishes. Wait instead for
+      // the provider's `onCreated` callback so the prompt is cleared as soon as
+      // the server accepts the run, while preserving it on dispatch failure.
+      await confirmRunStart((rejectStart) =>
+        stream
+          .submit(
+            {
+              messages: [
+                { type: "human", content: buildAgentMessageContent(vars) },
+              ],
+            },
+            {
+              config,
+              onError: (error) => {
+                markRunError()
+                rejectStart(error)
+              },
+            }
+          )
+          .catch((error) => {
+            markRunError()
+            throw error
+          })
+      )
     },
     onSuccess: () => {
       queryClient.setQueryData(agentThreadKeys.detail(threadId), (prev) =>
-        prev ? { ...prev, status: "running" as const } : prev,
-      );
-      invalidateAgentThreadLists(queryClient);
+        prev ? { ...prev, status: "running" as const } : prev
+      )
+      invalidateAgentThreadLists(queryClient)
     },
-  });
+  })
 }

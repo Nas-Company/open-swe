@@ -63,7 +63,7 @@ async def _capture_create_deep_agent_kwargs(
         patch(
             "agent.server.get_team_default_model_pair",
             new_callable=AsyncMock,
-            return_value=(("openai:gpt-5.5", "medium"), ("openai:gpt-5.5", "low")),
+            return_value=(("openai:gpt-5.6-sol", "medium"), ("openai:gpt-5.6-sol", "low")),
         ),
         patch("agent.server.load_profile", new_callable=AsyncMock, return_value=None),
         patch("agent.server.fallback_model_id_for", return_value=None),
@@ -124,3 +124,18 @@ async def test_agent_still_assembles_when_nas_skill_materialization_fails() -> N
     captured = await _capture_create_deep_agent_kwargs(skill_error=RuntimeError("upload failed"))
 
     assert captured["skills"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_guards_terminal_responses_with_artifact_delivery() -> None:
+    captured = await _capture_create_deep_agent_kwargs()
+    middleware = captured["middleware"]
+    assert isinstance(middleware, list)
+    names = [type(item).__name__ for item in middleware]
+
+    artifact_index = names.index("ArtifactDeliveryMiddleware")
+    ensure_index = names.index("ensure_no_empty_msg")
+
+    # after_model hooks execute in reverse registration order, so artifact
+    # delivery must see the raw terminal response before ensure_no_empty_msg.
+    assert artifact_index > ensure_index

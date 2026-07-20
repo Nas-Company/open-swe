@@ -69,8 +69,9 @@ LangSmith/LangGraph:
   LANGGRAPH_HOST_URL
 
 LLM:
+  CODEX_PROXY_BASE_URL / CODEX_PROXY_API_KEY
   ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL
-  OPENAI_API_KEY
+  OPENAI_API_KEY (only for direct OpenAI fallback outside Codex Proxy)
   GOOGLE_API_KEY
   FIREWORKS_API_KEY
   LLM_FALLBACK_MODEL_ID
@@ -104,6 +105,12 @@ Sandbox:
   MODAL_APP_NAME
   MODAL_TOKEN_ID
   MODAL_TOKEN_SECRET
+  MODAL_SANDBOX_TIMEOUT_SECONDS (optional, default 14400)
+  MODAL_SANDBOX_IDLE_TIMEOUT_SECONDS (optional, default 1800)
+  MODAL_SANDBOX_WORKDIR (optional, default /workspace)
+  MODAL_SANDBOX_CPU (optional, default 2)
+  MODAL_SANDBOX_MEMORY_MIB (optional, default 4096)
+  SANDBOX_CREATION_TIMEOUT_SECONDS (optional; Modal default 900)
 
 Optional integrations:
   LINEAR_API_KEY
@@ -129,6 +136,19 @@ DEFAULT_REPO_OWNER=Nas-Company
 DEFAULT_REPO_NAME=open-swe
 ```
 
+Model routing intent:
+
+```text
+OpenAI-compatible endpoint: Codex Proxy
+Default agent model: openai:gpt-5.6-sol (medium)
+Default agent subagent model: openai:gpt-5.6-sol (medium)
+LLM_FALLBACK_MODEL_ID=openai:gpt-5.6-sol
+```
+
+The fallback secret intentionally matches the default so a failed SOL request
+does not silently fall back to the retired GPT-5.5 route. MiniMax remains a
+selectable cross-provider option in the dashboard.
+
 Modal ownership:
 
 ```text
@@ -150,6 +170,75 @@ rollback value have been reviewed explicitly.
 Because production uses Modal as the command sandbox provider, LangSmith sandbox
 snapshot variables may be empty. If `SANDBOX_TYPE` changes back to `langsmith`,
 set `DEFAULT_SANDBOX_SNAPSHOT_ID` and the related snapshot resource settings.
+
+The Modal adapter builds a pinned Playwright/Chromium image with Python 3.12,
+Node, Bun, GitHub CLI, git, and ripgrep. Each thread's selected repository scopes
+a short-lived GitHub App installation token. The token stays in backend memory
+and is exposed only to a one-shot GitHub broker sandbox; the long-lived thread
+sandbox never receives it. Clone/fetch and fixed-SHA push data cross that boundary
+as Git bundles, and every broker is terminated after the command. Package
+installs, builds, tests, and browser renders therefore do not inherit GitHub
+credentials. Dashboard-user GitHub OAuth stays on the trusted server for identity
+and server-side API calls and is never forwarded to either sandbox. A private
+repository must be granted to the GitHub App installation before the broker can
+clone it; missing App access fails closed during sandbox creation.
+
+Every new Modal thread sandbox is also tagged with the configured app name and
+the Modal control-plane app ID. Reconnect verifies the exact sandbox ID through
+an app-ID-scoped lookup before any command or file operation. Sandboxes created
+before this ownership marker was introduced fail closed and are replaced on the
+next run, so their ephemeral `/workspace` contents do not migrate automatically.
+Download any required artifacts from an older thread before deploying this
+change.
+
+Dashboard messages can attach UTF-8 `.md`, `.html`, `.json`, `.csv`, and `.txt`
+files. The limits are five files, 2 MiB per file, and 10 MiB combined. The
+backend validates them, writes them under `/workspace/.open-swe/attachments/`,
+and replaces base64 blocks with exact sandbox paths before the model call.
+
+### Rendered-page visual QA
+
+Playwright supplies deterministic rendering and objective browser diagnostics;
+the model supplies the independent pixel-level review. For HTML and report work,
+the agent renders desktop and mobile views, captures a full-page overview plus
+legible viewport/section tiles for long pages, and calls `read_file` on each
+final screenshot. It records image observations separately from console, page,
+network, overflow, and accessibility diagnostics, then fixes and rerenders until
+both evidence sets pass.
+
+Codex Proxy uses Chat Completions. That API path accepts user-message images but
+can silently ignore image content carried directly by a tool-role message. The
+`CodexProxyToolImageMiddleware` therefore mirrors the latest image results from
+`read_file`, plus a bounded pending batch when intervening tool calls contain no
+durable visual observations, into one transient user-role multimodal message.
+The original thread messages and dashboard artifacts remain unchanged, all
+parallel tool results still precede the mirrored user message, and acknowledged
+or out-of-window screenshots are stripped from later provider requests. Visual
+read batches are capped at eight images and roughly 6 MiB of encoded payload.
+
+### Durable generated files
+
+Final user-facing files are copied out of the sandbox with the agent's
+`publish_artifact` tool and stored as chunked, checksummed records in the
+LangGraph Store. The dashboard lists them under the task's `Files` workspace
+tab and downloads them through authenticated `/dashboard/api/threads/*`
+endpoints. Downloads never reconnect to the sandbox, and HTML is always served
+as an attachment with content sniffing disabled.
+
+Artifact delivery has a server-side terminal-response guard as well as the
+model-facing tool instruction. If a normal completion forgets to call the tool,
+the guard injects auditable `publish_artifact` calls for eligible paths listed
+under an explicit `Deliverables` heading or staged in the controlled
+`.open-swe/deliverables/` outbox. It does not scan the repository, and it rejects
+attachments, hidden paths, credential-like names, symlinks, paths outside the
+sandbox workspace, and non-deliverable source extensions.
+
+Artifacts are retained for 30 days without refresh-on-read. Limits are 20 MiB
+per file, 10 files per task, and 50 MiB total per task. `langgraph.json` enables
+the Store TTL sweeper but intentionally does not set a global Store default TTL,
+because OAuth credentials, profiles, and team settings share the same Store.
+Manual task deletion removes its artifacts best-effort; per-item TTL bounds any
+orphaned data left by automatic thread expiry or a partial cleanup.
 
 ## Frontend Environment
 
@@ -192,7 +281,10 @@ Backend:
 3. Confirm the new revision builds.
 4. Wait for rollout to reach `DEPLOYED`.
 5. Confirm the deployment active/latest revision points to the new revision.
-6. Confirm the public backend reports the new host revision:
+6. Confirm the public backend reports the new host revision.
+7. For sandbox-runtime changes, run a real production agent smoke test that
+   clones a private repo and checks `bun`, `playwright`, Chromium rendering,
+   screenshot reading, and sandbox reconnect persistence.
 
 ```bash
 curl -sS https://nascompany-open-swe-5786464fff6d52fdb4f32c80d541067d.aws.us.langgraph.app/info

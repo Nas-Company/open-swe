@@ -5,6 +5,7 @@
 # ruff: noqa: E402
 import logging
 import os
+import posixpath
 import time
 import warnings
 from collections.abc import Sequence
@@ -54,12 +55,15 @@ from .integrations.langsmith_tools import load_langsmith_tools
 from .integrations.live_issue_mcp import load_live_issue_tools
 from .integrations.notion_mcp import load_notion_tools
 from .middleware import (
+    ArtifactDeliveryMiddleware,
+    CodexProxyToolImageMiddleware,
     ModelFallbackMiddleware,
     PlanModeMiddleware,
     SandboxCircuitBreakerMiddleware,
     SanitizeThinkingBlocksMiddleware,
     SanitizeToolInputsMiddleware,
     SlackAssistantStatusMiddleware,
+    TextFileAttachmentMiddleware,
     ToolArtifactMiddleware,
     ToolErrorMiddleware,
     WorkflowPushGuardMiddleware,
@@ -81,6 +85,7 @@ from .tools import (
     linear_list_teams,
     linear_update_issue,
     open_pull_request,
+    publish_artifact,
     request_pr_review,
     save_plan,
     schedule_thread_wakeup,
@@ -100,7 +105,7 @@ from .utils.github_app import (
     PermissionMap,
     get_github_app_installation_token_with_expiry,
 )
-from .utils.github_proxy import record_proxy_token_expiry
+from .utils.github_proxy import clear_proxy_token_expiry, record_proxy_token_expiry
 from .utils.model import (
     DEFAULT_LLM_REASONING,
     ModelKwargs,
@@ -117,7 +122,14 @@ from .utils.tracing import AGENT_TRACING_PROJECT, traced_graph_factory
 client = get_client()
 
 SANDBOX_CREATING = "__creating__"
-SANDBOX_CREATION_TIMEOUT = 180
+_DEFAULT_SANDBOX_CREATION_TIMEOUT = (
+    15 * 60 if os.getenv("SANDBOX_TYPE", "langsmith") == "modal" else 3 * 60
+)
+SANDBOX_CREATION_TIMEOUT = int(
+    os.getenv("SANDBOX_CREATION_TIMEOUT_SECONDS", str(_DEFAULT_SANDBOX_CREATION_TIMEOUT))
+)
+if SANDBOX_CREATION_TIMEOUT <= 0:
+    raise ValueError("SANDBOX_CREATION_TIMEOUT_SECONDS must be a positive integer")
 SANDBOX_POLL_INTERVAL = 1.0
 
 from .utils.sandbox_state import (
@@ -188,13 +200,17 @@ async def _start_langsmith_sandbox_if_needed(sandbox_backend: SandboxBackendProt
 async def _resolve_proxy_token(
     github_proxy_token: str | None,
     *,
+    repositories: Sequence[str] | None = None,
     permissions: PermissionMap | None = None,
 ) -> tuple[str | None, str | None]:
     """Resolve the proxy token and its expiry."""
     if github_proxy_token:
         return github_proxy_token, None
     effective_permissions = permissions or RUNTIME_PROXY_TOKEN_PERMISSIONS
-    return await get_github_app_installation_token_with_expiry(permissions=effective_permissions)
+    return await get_github_app_installation_token_with_expiry(
+        repositories=repositories,
+        permissions=effective_permissions,
+    )
 
 
 async def _resolve_snapshot_id_for_repo(repo: dict[str, str] | None) -> str | None:
@@ -212,34 +228,81 @@ async def _resolve_snapshot_id_for_repo(repo: dict[str, str] | None) -> str | No
         return None
 
 
+def _sandbox_auth_unavailable_message(repositories: Sequence[str] | None) -> str:
+    scope = ", ".join(repositories or ())
+    scope_hint = f" for repository scope [{scope}]" if scope else " for the App installation"
+    return (
+        "Cannot configure sandbox GitHub auth: installation token is unavailable"
+        f"{scope_hint}. Confirm the GitHub App installation has access to the selected "
+        "repository; user OAuth is intentionally never forwarded to the sandbox."
+    )
+
+
 async def _create_sandbox_with_proxy(
     github_proxy_token: str | None = None,
     *,
     thread_id: str | None = None,
     github_proxy_repositories: Sequence[str] | None = None,
+    github_proxy_permissions: PermissionMap | None = None,
+    github_proxy_token_refreshable: bool = False,
     repo: dict[str, str] | None = None,
 ) -> SandboxBackendProtocol:
-    """Create a new sandbox with GitHub proxy auth configured."""
+    """Create a new sandbox with provider-appropriate GitHub auth configured."""
+    sandbox_type = os.getenv("SANDBOX_TYPE", "langsmith")
+    token: str | None = None
+    expires_at: str | None = None
+    if sandbox_type in {"langsmith", "modal"}:
+        token, expires_at = await _resolve_proxy_token(
+            github_proxy_token,
+            repositories=github_proxy_repositories,
+            permissions=github_proxy_permissions,
+        )
+        if not token:
+            msg = _sandbox_auth_unavailable_message(github_proxy_repositories)
+            logger.error(msg)
+            raise ValueError(msg)
+
     snapshot_id = await _resolve_snapshot_id_for_repo(repo)
     sandbox_backend = await asyncio.to_thread(create_sandbox, snapshot_id=snapshot_id)
 
-    sandbox_type = os.getenv("SANDBOX_TYPE", "langsmith")
-    if sandbox_type == "langsmith":
-        token, expires_at = await _resolve_proxy_token(github_proxy_token)
-        if not token:
-            msg = "Cannot configure proxy: GitHub App installation token is unavailable"
-            logger.error(msg)
-            raise ValueError(msg)
-        await _start_langsmith_sandbox_if_needed(sandbox_backend)
-        await asyncio.to_thread(_configure_github_proxy, sandbox_backend.id, token)
-        record_proxy_token_expiry(
-            thread_id,
-            expires_at,
-            repositories=github_proxy_repositories,
-            permissions=None if github_proxy_token else RUNTIME_PROXY_TOKEN_PERMISSIONS,
-        )
+    if sandbox_type in {"langsmith", "modal"}:
+        assert token is not None
+        await _configure_sandbox_github_auth(sandbox_backend, token)
+        if github_proxy_token is None or github_proxy_token_refreshable:
+            recorded_permissions = github_proxy_permissions
+            if recorded_permissions is None and github_proxy_token is None:
+                recorded_permissions = RUNTIME_PROXY_TOKEN_PERMISSIONS
+            record_proxy_token_expiry(
+                thread_id,
+                expires_at,
+                repositories=github_proxy_repositories,
+                permissions=recorded_permissions,
+            )
+        else:
+            clear_proxy_token_expiry(thread_id)
 
     return sandbox_backend
+
+
+async def _configure_sandbox_github_auth(
+    sandbox_backend: SandboxBackendProtocol,
+    token: str,
+) -> None:
+    """Apply a short-lived GitHub token without persisting it in the sandbox."""
+    sandbox_type = os.getenv("SANDBOX_TYPE", "langsmith")
+    if sandbox_type == "langsmith":
+        await _start_langsmith_sandbox_if_needed(sandbox_backend)
+        current_backend = unwrap_sandbox_backend(sandbox_backend)
+        await asyncio.to_thread(_configure_github_proxy, current_backend.id, token)
+        return
+    if sandbox_type == "modal":
+        setter = getattr(sandbox_backend, "set_github_token", None)
+        if not callable(setter):
+            current_backend = unwrap_sandbox_backend(sandbox_backend)
+            setter = getattr(current_backend, "set_github_token", None)
+        if not callable(setter):
+            raise TypeError("Modal sandbox backend does not support command-scoped GitHub auth")
+        setter(token)
 
 
 async def _refresh_github_proxy(
@@ -248,28 +311,38 @@ async def _refresh_github_proxy(
     *,
     thread_id: str | None = None,
     github_proxy_repositories: Sequence[str] | None = None,
+    github_proxy_permissions: PermissionMap | None = None,
+    github_proxy_token_refreshable: bool = False,
 ) -> None:
-    """Refresh GitHub proxy credentials for reused LangSmith sandboxes."""
-    if os.getenv("SANDBOX_TYPE", "langsmith") != "langsmith":
+    """Refresh GitHub credentials for a reused authenticated sandbox."""
+    if os.getenv("SANDBOX_TYPE", "langsmith") not in {"langsmith", "modal"}:
         return
 
-    token, expires_at = await _resolve_proxy_token(github_proxy_token)
-    if not token:
-        logger.warning(
-            "Skipping GitHub proxy refresh for sandbox %s: installation token unavailable",
-            sandbox_backend.id,
-        )
-        return
-
-    current_backend = unwrap_sandbox_backend(sandbox_backend)
-    await _start_langsmith_sandbox_if_needed(current_backend)
-    await asyncio.to_thread(_configure_github_proxy, current_backend.id, token)
-    record_proxy_token_expiry(
-        thread_id,
-        expires_at,
+    token, expires_at = await _resolve_proxy_token(
+        github_proxy_token,
         repositories=github_proxy_repositories,
-        permissions=None if github_proxy_token else RUNTIME_PROXY_TOKEN_PERMISSIONS,
+        permissions=github_proxy_permissions,
     )
+    if not token:
+        if os.getenv("SANDBOX_TYPE", "langsmith") == "modal":
+            setter = getattr(sandbox_backend, "set_github_token", None)
+            if callable(setter):
+                setter(None)
+        raise ValueError(_sandbox_auth_unavailable_message(github_proxy_repositories))
+
+    await _configure_sandbox_github_auth(sandbox_backend, token)
+    if github_proxy_token is None or github_proxy_token_refreshable:
+        recorded_permissions = github_proxy_permissions
+        if recorded_permissions is None and github_proxy_token is None:
+            recorded_permissions = RUNTIME_PROXY_TOKEN_PERMISSIONS
+        record_proxy_token_expiry(
+            thread_id,
+            expires_at,
+            repositories=github_proxy_repositories,
+            permissions=recorded_permissions,
+        )
+    else:
+        clear_proxy_token_expiry(thread_id)
 
 
 async def _refresh_github_proxy_or_recreate(
@@ -277,6 +350,8 @@ async def _refresh_github_proxy_or_recreate(
     thread_id: str,
     github_proxy_token: str | None = None,
     github_proxy_repositories: Sequence[str] | None = None,
+    github_proxy_permissions: PermissionMap | None = None,
+    github_proxy_token_refreshable: bool = False,
     repo: dict[str, str] | None = None,
 ) -> SandboxBackendProtocol:
     """Refresh proxy credentials, recreating stale LangSmith sandboxes on failure."""
@@ -286,6 +361,8 @@ async def _refresh_github_proxy_or_recreate(
             github_proxy_token,
             thread_id=thread_id,
             github_proxy_repositories=github_proxy_repositories,
+            github_proxy_permissions=github_proxy_permissions,
+            github_proxy_token_refreshable=github_proxy_token_refreshable,
         )
     except Exception:  # noqa: BLE001
         logger.warning(
@@ -298,6 +375,8 @@ async def _refresh_github_proxy_or_recreate(
             thread_id,
             github_proxy_token=github_proxy_token,
             github_proxy_repositories=github_proxy_repositories,
+            github_proxy_permissions=github_proxy_permissions,
+            github_proxy_token_refreshable=github_proxy_token_refreshable,
             repo=repo,
         )
     return sandbox_backend
@@ -316,6 +395,8 @@ async def _recreate_sandbox(
     *,
     github_proxy_token: str | None = None,
     github_proxy_repositories: Sequence[str] | None = None,
+    github_proxy_permissions: PermissionMap | None = None,
+    github_proxy_token_refreshable: bool = False,
     repo: dict[str, str] | None = None,
 ) -> SandboxBackendProtocol:
     """Recreate a sandbox after a connection failure.
@@ -332,6 +413,8 @@ async def _recreate_sandbox(
                 github_proxy_token,
                 thread_id=thread_id,
                 github_proxy_repositories=github_proxy_repositories,
+                github_proxy_permissions=github_proxy_permissions,
+                github_proxy_token_refreshable=github_proxy_token_refreshable,
                 repo=repo,
             ),
         )
@@ -347,6 +430,8 @@ async def check_or_recreate_sandbox(
     thread_id: str,
     github_proxy_token: str | None = None,
     github_proxy_repositories: Sequence[str] | None = None,
+    github_proxy_permissions: PermissionMap | None = None,
+    github_proxy_token_refreshable: bool = False,
     repo: dict[str, str] | None = None,
 ) -> SandboxBackendProtocol:
     """Check if a cached sandbox is reachable; recreate it if not.
@@ -371,6 +456,8 @@ async def check_or_recreate_sandbox(
             thread_id,
             github_proxy_token=github_proxy_token,
             github_proxy_repositories=github_proxy_repositories,
+            github_proxy_permissions=github_proxy_permissions,
+            github_proxy_token_refreshable=github_proxy_token_refreshable,
             repo=repo,
         )
     return sandbox_backend
@@ -428,6 +515,8 @@ async def ensure_sandbox_for_thread(
     *,
     github_proxy_token: str | None = None,
     github_proxy_repositories: Sequence[str] | None = None,
+    github_proxy_permissions: PermissionMap | None = None,
+    github_proxy_token_refreshable: bool = False,
     repo: dict[str, str] | None = None,
 ) -> SandboxBackendProtocol:
     """Get-or-create a healthy sandbox bound to ``thread_id``.
@@ -457,11 +546,23 @@ async def ensure_sandbox_for_thread(
         logger.info("Using cached sandbox backend for thread %s", thread_id)
         original_sandbox_id = sandbox_backend.id
         sandbox_backend = await check_or_recreate_sandbox(
-            sandbox_backend, thread_id, github_proxy_token, github_proxy_repositories, repo
+            sandbox_backend,
+            thread_id,
+            github_proxy_token=github_proxy_token,
+            github_proxy_repositories=github_proxy_repositories,
+            github_proxy_permissions=github_proxy_permissions,
+            github_proxy_token_refreshable=github_proxy_token_refreshable,
+            repo=repo,
         )
         if sandbox_backend.id == original_sandbox_id:
             sandbox_backend = await _refresh_github_proxy_or_recreate(
-                sandbox_backend, thread_id, github_proxy_token, github_proxy_repositories, repo
+                sandbox_backend,
+                thread_id,
+                github_proxy_token=github_proxy_token,
+                github_proxy_repositories=github_proxy_repositories,
+                github_proxy_permissions=github_proxy_permissions,
+                github_proxy_token_refreshable=github_proxy_token_refreshable,
+                repo=repo,
             )
     elif sandbox_id is None:
         logger.info("Creating new sandbox for thread %s", thread_id)
@@ -471,6 +572,8 @@ async def ensure_sandbox_for_thread(
                 github_proxy_token,
                 thread_id=thread_id,
                 github_proxy_repositories=github_proxy_repositories,
+                github_proxy_permissions=github_proxy_permissions,
+                github_proxy_token_refreshable=github_proxy_token_refreshable,
                 repo=repo,
             )
             logger.info("Sandbox created: %s", sandbox_backend.id)
@@ -494,6 +597,8 @@ async def ensure_sandbox_for_thread(
                     github_proxy_token,
                     thread_id=thread_id,
                     github_proxy_repositories=github_proxy_repositories,
+                    github_proxy_permissions=github_proxy_permissions,
+                    github_proxy_token_refreshable=github_proxy_token_refreshable,
                     repo=repo,
                 )
                 created_replacement_sandbox = True
@@ -504,11 +609,23 @@ async def ensure_sandbox_for_thread(
         if not created_replacement_sandbox:
             original_sandbox_id = sandbox_backend.id
             sandbox_backend = await check_or_recreate_sandbox(
-                sandbox_backend, thread_id, github_proxy_token, github_proxy_repositories, repo
+                sandbox_backend,
+                thread_id,
+                github_proxy_token=github_proxy_token,
+                github_proxy_repositories=github_proxy_repositories,
+                github_proxy_permissions=github_proxy_permissions,
+                github_proxy_token_refreshable=github_proxy_token_refreshable,
+                repo=repo,
             )
             if sandbox_backend.id == original_sandbox_id:
                 sandbox_backend = await _refresh_github_proxy_or_recreate(
-                    sandbox_backend, thread_id, github_proxy_token, github_proxy_repositories, repo
+                    sandbox_backend,
+                    thread_id,
+                    github_proxy_token=github_proxy_token,
+                    github_proxy_repositories=github_proxy_repositories,
+                    github_proxy_permissions=github_proxy_permissions,
+                    github_proxy_token_refreshable=github_proxy_token_refreshable,
+                    repo=repo,
                 )
 
     sandbox_backend = set_sandbox_backend(thread_id, sandbox_backend)
@@ -549,6 +666,7 @@ PLAN_MODE_EXCLUDED_TOOLS: frozenset[str] = frozenset(
         "task",
         "http_request",
         "open_pull_request",
+        "publish_artifact",
         "request_pr_review",
         "linear_create_issue",
         "linear_update_issue",
@@ -563,6 +681,7 @@ def _general_purpose_subagent(model: BaseChatModel) -> SubAgent:
         "description": GENERAL_PURPOSE_SUBAGENT["description"],
         "system_prompt": GENERAL_PURPOSE_SUBAGENT["system_prompt"],
         "model": model,
+        "middleware": [CodexProxyToolImageMiddleware()],
     }
 
 
@@ -652,11 +771,18 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     profile_login = resolve_github_login(config)
     configurable = (config or {}).get("configurable") or {}
     prompt_default_repo = await _resolve_prompt_default_repo(configurable)
+    github_proxy_repositories = (
+        [prompt_default_repo["name"]] if prompt_default_repo is not None else None
+    )
     triggering_user_identity_task = asyncio.create_task(
         asyncio.to_thread(resolve_triggering_user_identity, config, github_token)
     )
     sandbox_task = asyncio.create_task(
-        ensure_sandbox_for_thread(thread_id, repo=prompt_default_repo)
+        ensure_sandbox_for_thread(
+            thread_id,
+            github_proxy_repositories=github_proxy_repositories,
+            repo=prompt_default_repo,
+        )
     )
     team_defaults_task = asyncio.create_task(get_team_default_model_pair("agent"))
     profile_task = asyncio.create_task(load_profile(profile_login)) if profile_login else None
@@ -666,6 +792,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         team_defaults_task,
     )
     profile = await profile_task if profile_task is not None else None
+    del github_proxy_repositories
     del github_token
 
     linear_issue = config["configurable"].get("linear_issue", {})
@@ -678,6 +805,11 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     except Exception:
         logger.warning("Failed to materialize NAS skills", exc_info=True)
         nas_skill_sources = []
+    repo_dir = (
+        posixpath.join(work_dir, prompt_default_repo["name"])
+        if prompt_default_repo is not None
+        else work_dir
+    )
 
     def backend_factory(_runtime: object, _thread_id: str = thread_id) -> SandboxBackendProtocol:
         return _get_cached_sandbox_backend(_thread_id)
@@ -856,6 +988,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
             linear_list_teams,
             linear_update_issue,
             open_pull_request,
+            publish_artifact,
             request_pr_review,
             schedule_thread_wakeup,
             slack_read_thread_messages,
@@ -877,12 +1010,19 @@ async def get_agent(config: RunnableConfig) -> Pregel:
             WorkflowPushGuardMiddleware(),
             refresh_github_proxy_before_model,
             check_message_queue_before_model,
+            TextFileAttachmentMiddleware(),
             SlackAssistantStatusMiddleware(),
             ensure_no_empty_msg,
+            ArtifactDeliveryMiddleware(
+                work_dir=work_dir,
+                repo_dir=repo_dir,
+                sandbox_backend=sandbox_backend,
+            ),
             notify_step_limit_reached,
             SandboxCircuitBreakerMiddleware(),
             *fallback_middleware,
             *plan_mode_middleware,
+            CodexProxyToolImageMiddleware(),
             SanitizeThinkingBlocksMiddleware(),
         ],
     ).with_config(config)

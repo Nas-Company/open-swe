@@ -11,13 +11,25 @@ from agent.dashboard.options import model_supports_images
 
 _HIDDEN_TEXT_ONLY_MODEL = "fireworks:accounts/fireworks/models/deepseek-v4-pro"
 _MINIMAX_MODEL = "anthropic:claude-opus-4-8"
-_VISION_MODEL = "openai:gpt-5.5"
+_VISION_MODEL = "openai:gpt-5.6-sol"
 
 
 def _image() -> thread_api.DashboardImageBody:
     return thread_api.DashboardImageBody(
         base64=base64.b64encode(b"image").decode("ascii"),
         mimeType="image/png",
+    )
+
+
+def _file(
+    file_name: str = "notes.md",
+    data: bytes = b"# Notes",
+    mime_type: str = "text/markdown",
+) -> thread_api.DashboardTextFileBody:
+    return thread_api.DashboardTextFileBody(
+        base64=base64.b64encode(data).decode("ascii"),
+        mimeType=mime_type,
+        fileName=file_name,
     )
 
 
@@ -44,6 +56,111 @@ def test_user_message_content_allows_images_for_vision_model() -> None:
     assert isinstance(content, list)
     assert content[-1] == {"type": "text", "text": "see attached"}
     assert any(block.get("type") != "text" for block in content)
+
+
+def test_user_message_content_emits_canonical_file_blocks() -> None:
+    content = thread_api._user_message_content("read this", [], files=[_file()])
+
+    assert content == [
+        {
+            "type": "file",
+            "base64": base64.b64encode(b"# Notes").decode("ascii"),
+            "mime_type": "text/markdown",
+            "file_name": "notes.md",
+        },
+        {"type": "text", "text": "read this"},
+    ]
+
+
+def test_user_message_content_rejects_combined_encoded_attachment_overflow(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "agent.utils.text_file_attachments.MAX_ATTACHMENT_ENCODED_BYTES",
+        15,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        thread_api._user_message_content(
+            "read this",
+            [_image()],
+            files=[_file("notes.txt", b"hello", "text/plain")],
+            model_id=_VISION_MODEL,
+        )
+
+    assert exc_info.value.status_code == 422
+    assert "encoded payload limit" in exc_info.value.detail
+
+
+def test_user_message_content_rejects_invalid_text_file() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        thread_api._user_message_content(
+            "read this",
+            [],
+            files=[_file("../notes.md")],
+        )
+
+    assert exc_info.value.status_code == 422
+    assert "must not contain a path" in exc_info.value.detail
+
+
+def test_dashboard_files_from_content_normalizes_validation_errors() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        thread_api._dashboard_files_from_content(
+            [
+                {
+                    "type": "file",
+                    "base64": "aGVsbG8=",
+                    "mime_type": "text/plain",
+                    "file_name": f"{'a' * 256}.txt",
+                }
+            ]
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "invalid file attachment"
+
+
+def test_canonicalize_command_file_blocks_normalizes_aliases_and_strips_extras() -> None:
+    content = thread_api._canonicalize_command_file_blocks(
+        [
+            {
+                "type": "file",
+                "base64": "aGVsbG8=",
+                "mimeType": "TEXT/PLAIN; charset=utf-8",
+                "fileName": "notes.txt",
+                "kind": "file",
+                "display_label": "untrusted extra",
+            },
+            {"type": "text", "text": "read it"},
+        ]
+    )
+
+    assert content == [
+        {
+            "type": "file",
+            "base64": "aGVsbG8=",
+            "mime_type": "text/plain",
+            "file_name": "notes.txt",
+        },
+        {"type": "text", "text": "read it"},
+    ]
+
+
+def test_canonicalize_command_file_blocks_rejects_data_payload() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        thread_api._canonicalize_command_file_blocks(
+            [
+                {
+                    "type": "file",
+                    "base64": "aGVsbG8=",
+                    "data": "aGVsbG8=",
+                    "mimeType": "text/plain",
+                    "fileName": "notes.txt",
+                }
+            ]
+        )
+
+    assert exc_info.value.status_code == 422
+    assert "must use base64 only" in exc_info.value.detail
 
 
 def test_langgraph_proxy_headers_include_api_key(monkeypatch) -> None:
@@ -210,6 +327,52 @@ async def test_enrich_run_start_command_creates_and_stamps_new_thread(monkeypatc
     # Dashboard-only creation hints must not leak into the run config.
     assert "repo_explicitly_none" not in configurable
     assert enriched["params"]["assistant_id"] == "agent"
+
+
+async def test_enrich_run_start_command_forwards_only_canonical_file_blocks(monkeypatch) -> None:
+    created: dict[str, object] = {}
+    _patch_new_thread_deps(monkeypatch, profile={})
+    monkeypatch.setattr(thread_api, "langgraph_client", lambda: _new_thread_client(created))
+
+    command = {
+        "method": "run.start",
+        "params": {
+            "input": {
+                "messages": [
+                    {
+                        "type": "human",
+                        "content": [
+                            {
+                                "type": "file",
+                                "base64": "aGVsbG8=",
+                                "mimeType": "text/plain",
+                                "fileName": "notes.txt",
+                                "kind": "file",
+                            }
+                        ],
+                    }
+                ]
+            },
+            "config": {"configurable": {}},
+        },
+    }
+
+    enriched = await thread_api._enrich_run_start_command(
+        "new-tid",
+        "octocat",
+        command,
+        metadata={},
+        creating=True,
+    )
+
+    assert enriched["params"]["input"]["messages"][-1]["content"] == [
+        {
+            "type": "file",
+            "base64": "aGVsbG8=",
+            "mime_type": "text/plain",
+            "file_name": "notes.txt",
+        }
+    ]
 
 
 async def test_enrich_run_start_command_allows_images_after_hidden_profile_falls_back(
@@ -691,6 +854,7 @@ async def test_create_dashboard_thread_run_creates_thread_and_run(monkeypatch) -
         "octocat",
         thread_api.ThreadCreateRunBody(
             content="Investigate production issue",
+            files=[_file("analysis.md", b"# Analysis")],
             repo="Nas-Company/open-swe",
             model_id=_VISION_MODEL,
             effort="high",
@@ -705,6 +869,15 @@ async def test_create_dashboard_thread_run_creates_thread_and_run(monkeypatch) -
     assert created["metadata"]["latest_run_status"] == "pending"
     assert runs[0]["thread_id"] == "tid"
     assert runs[0]["assistant_id"] == "agent"
+    message_content = runs[0]["input"]["messages"][0]["content"]
+    assert message_content[0] == {
+        "type": "file",
+        "base64": base64.b64encode(b"# Analysis").decode("ascii"),
+        "mime_type": "text/markdown",
+        "file_name": "analysis.md",
+    }
+    assert "files" not in created["metadata"]
+    assert "base64" not in json.dumps(created["metadata"])
     assert "stream_mode" not in runs[0]
     assert "stream_resumable" not in runs[0]
     configurable = runs[0]["config"]["configurable"]
@@ -1098,6 +1271,54 @@ async def test_send_dashboard_message_does_not_attribute_owner(monkeypatch) -> N
     )
 
     assert captured["payload"]["text"] == "ship it"
+
+
+async def test_send_dashboard_message_queues_files_separately_from_images(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeThreads:
+        async def get(self, thread_id: str) -> dict[str, object]:
+            return {
+                "thread_id": "tid",
+                "metadata": {"source": "dashboard", "github_login": "owner"},
+            }
+
+        async def update(self, *, thread_id: str, metadata: dict[str, object]) -> None:
+            pass
+
+    class FakeClient:
+        threads = FakeThreads()
+
+    async def active(thread_id: str) -> bool:
+        return True
+
+    async def fake_queue(thread_id: str, payload: dict[str, object]) -> bool:
+        captured["payload"] = payload
+        return True
+
+    monkeypatch.setattr(thread_api, "langgraph_client", lambda: FakeClient())
+    monkeypatch.setattr(thread_api, "get_thread_active_status", active)
+    monkeypatch.setattr(thread_api, "queue_message_for_thread", fake_queue)
+
+    await thread_api.send_dashboard_message(
+        "tid",
+        "owner",
+        thread_api.ThreadMessageBody(
+            content="read it", files=[_file("notes.txt", b"hi", "text/plain")]
+        ),
+    )
+
+    payload = captured["payload"]
+    assert payload["text"] == "read it"
+    assert "images" not in payload
+    assert payload["files"] == [
+        {
+            "type": "file",
+            "base64": base64.b64encode(b"hi").decode("ascii"),
+            "mime_type": "text/plain",
+            "file_name": "notes.txt",
+        }
+    ]
 
 
 def test_thread_summary_exposes_resolved_state() -> None:

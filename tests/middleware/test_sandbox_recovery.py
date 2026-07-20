@@ -22,8 +22,14 @@ class FakeSandboxBackend(SandboxBackendProtocol):
         return ExecuteResponse(output=f"{self.id}: {command}: {timeout}", exit_code=0)
 
 
-def _tool_request(thread_id: str = "thread-1") -> ToolCallRequest:
-    runtime = MagicMock(config={"configurable": {"thread_id": thread_id}})
+def _tool_request(
+    thread_id: str = "thread-1",
+    repo: dict[str, str] | None = None,
+) -> ToolCallRequest:
+    configurable: dict[str, object] = {"thread_id": thread_id}
+    if repo:
+        configurable["repo"] = repo
+    runtime = MagicMock(config={"configurable": configurable})
     return ToolCallRequest(
         tool_call={"name": "ls", "args": {"path": "/"}, "id": "tc1"},
         tool=MagicMock(),
@@ -88,6 +94,78 @@ async def test_sandbox_client_error_recreates_sandbox() -> None:
         assert "sb-new" in payload["error"]
     finally:
         clear_sandbox_backend("thread-1")
+
+
+@pytest.mark.asyncio
+async def test_modal_sandbox_recovery_mints_repo_scoped_app_token() -> None:
+    middleware = ToolErrorMiddleware()
+    request = _tool_request("thread-oauth", {"owner": "Nas-Company", "name": "nas-reporting"})
+    backend = FakeSandboxBackend()
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        raise SandboxClientError("Modal sandbox expired")
+
+    try:
+        with (
+            patch.dict("os.environ", {"SANDBOX_TYPE": "modal"}),
+            patch(
+                "agent.server._recreate_sandbox",
+                new_callable=AsyncMock,
+                return_value=backend,
+            ) as mock_recreate,
+            patch("agent.server.client") as mock_client,
+        ):
+            mock_client.threads.update = AsyncMock()
+            result = await middleware.awrap_tool_call(request, handler)
+
+        assert isinstance(result, ToolMessage)
+        mock_recreate.assert_awaited_once_with(
+            "thread-oauth",
+            repo={"owner": "Nas-Company", "name": "nas-reporting"},
+            github_proxy_repositories=["nas-reporting"],
+        )
+    finally:
+        clear_sandbox_backend("thread-oauth")
+
+
+@pytest.mark.asyncio
+async def test_modal_sandbox_recovery_preserves_recorded_default_repo_scope() -> None:
+    middleware = ToolErrorMiddleware()
+    request = _tool_request("thread-default")
+    backend = FakeSandboxBackend()
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        raise SandboxClientError("Modal sandbox expired")
+
+    try:
+        with (
+            patch.dict("os.environ", {"SANDBOX_TYPE": "modal"}),
+            patch(
+                "agent.utils.github_proxy.proxy_token_repositories",
+                return_value=("nas-reporting",),
+            ),
+            patch(
+                "agent.utils.github_proxy.proxy_token_permissions",
+                return_value={"contents": "read", "pull_requests": "read"},
+            ),
+            patch(
+                "agent.server._recreate_sandbox",
+                new_callable=AsyncMock,
+                return_value=backend,
+            ) as mock_recreate,
+            patch("agent.server.client") as mock_client,
+        ):
+            mock_client.threads.update = AsyncMock()
+            result = await middleware.awrap_tool_call(request, handler)
+
+        assert isinstance(result, ToolMessage)
+        mock_recreate.assert_awaited_once_with(
+            "thread-default",
+            github_proxy_repositories=["nas-reporting"],
+            github_proxy_permissions={"contents": "read", "pull_requests": "read"},
+        )
+    finally:
+        clear_sandbox_backend("thread-default")
 
 
 def test_repeated_sandbox_errors_trigger_circuit_breaker_once() -> None:

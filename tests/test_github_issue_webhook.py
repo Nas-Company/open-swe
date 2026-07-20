@@ -82,7 +82,7 @@ def test_build_github_issue_prompt_includes_issue_context() -> None:
     assert "Fix the flaky test" in prompt
     assert "The test is failing intermittently." in prompt
     assert "Please take a look" in prompt
-    assert "GH_TOKEN=dummy gh issue comment" in prompt
+    assert 'GH_TOKEN="${GH_TOKEN:-dummy}" gh issue comment' in prompt
 
 
 def test_build_github_issue_followup_prompt_only_includes_comment() -> None:

@@ -47,8 +47,12 @@ def test_reviewer_system_prompt_repo_not_ready_warns_stale() -> None:
     )
     assert "Repo prep FAILED" in prompt
     assert "stale" in prompt
-    assert "git checkout --force abc123" in prompt
-    assert "git rev-parse HEAD" in prompt
+    assert "Run each command below in a separate execute call" in prompt
+    assert "git -C /workspace/repo checkout --force abc123" in prompt
+    assert "git -C /workspace/repo rev-parse HEAD" in prompt
+    assert "git fetch origin abc123 --quiet ||" not in prompt
+    assert "gh repo clone acme/repo &&" not in prompt
+    assert "Never\ncombine authenticated `git`/`gh` operations" in prompt
     assert "already cloned and checked out at the PR head" not in prompt
 
 
@@ -60,7 +64,7 @@ def test_reviewer_system_prompt_repo_not_ready_without_head_sha() -> None:
         pr_number=42,
         repo_ready=False,
     )
-    assert "git checkout --force <head_sha>" in prompt
+    assert "git -C /workspace/repo checkout --force <head_sha>" in prompt
 
 
 def test_reviewer_system_prompt_includes_repo_style_section() -> None:
@@ -214,14 +218,23 @@ async def test_reviewer_resolves_app_installation_token_at_run_start() -> None:
     assert "github_token_encrypted" not in metadata
     # Token is resolved in this process at run start (scoped to the repo), not read
     # from a cache the webhook handler populated in a different process.
-    mock_app_token.assert_awaited_once_with(repositories=["repo"])
-    mock_cache_token.assert_called_once_with("reviewer-thread-id", "app-token", expires_at=None)
+    mock_app_token.assert_awaited_once_with(
+        repositories=["repo"],
+        permissions=reviewer.REVIEWER_API_TOKEN_PERMISSIONS,
+    )
+    mock_cache_token.assert_called_once_with(
+        "reviewer-thread-id",
+        "app-token",
+        expires_at=None,
+        source="app",
+    )
     middleware = create_agent.call_args.kwargs["middleware"]
     assert reviewer.check_message_queue_before_model in middleware
+    assert any(isinstance(item, reviewer.CodexProxyToolImageMiddleware) for item in middleware)
 
 
 @pytest.mark.asyncio
-async def test_reviewer_reuses_app_token_for_sandbox_proxy() -> None:
+async def test_reviewer_separates_server_api_and_read_only_sandbox_tokens() -> None:
     config: RunnableConfig = {
         "configurable": {
             "__is_for_execution__": True,
@@ -265,8 +278,8 @@ async def test_reviewer_reuses_app_token_for_sandbox_proxy() -> None:
 
     mock_sandbox.assert_awaited_once_with(
         "reviewer-thread-id",
-        github_proxy_token="app-token",
         github_proxy_repositories=["repo"],
+        github_proxy_permissions=reviewer.READ_ONLY_SANDBOX_TOKEN_PERMISSIONS,
         repo={"owner": "acme", "name": "repo"},
     )
 
@@ -315,7 +328,7 @@ async def test_reviewer_applies_eval_model_and_effort_overrides() -> None:
             "head_sha": "head",
             "reviewer_model_id": "anthropic:claude-opus-4-8",
             "reviewer_reasoning_effort": "high",
-            "reviewer_subagent_model_id": "openai:gpt-5.5",
+            "reviewer_subagent_model_id": "openai:gpt-5.6-sol",
             "reviewer_subagent_reasoning_effort": "low",
         },
         "metadata": {},
@@ -348,7 +361,7 @@ async def test_reviewer_applies_eval_model_and_effort_overrides() -> None:
     assert main_model_call.kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert main_model_call.kwargs["effort"] == "high"
     subagent_model_call = make_model.call_args_list[1]
-    assert subagent_model_call.args == ("openai:gpt-5.5",)
+    assert subagent_model_call.args == ("openai:gpt-5.6-sol",)
     assert subagent_model_call.kwargs["reasoning"] == {"effort": "low", "summary": "auto"}
 
 

@@ -61,11 +61,14 @@ async def _build_blocks_from_payload(
     text = payload.get("text", "")
     image_urls = payload.get("image_urls", []) or []
     images = payload.get("images", []) or []
+    files = payload.get("files", []) or []
     blocks: list[dict[str, Any]] = []
     if text:
         blocks.append({"type": "text", "text": text})
     if isinstance(images, list):
         blocks.extend(image for image in images if isinstance(image, dict))
+    if isinstance(files, list):
+        blocks.extend(file for file in files if isinstance(file, dict))
 
     if not image_urls:
         return blocks
@@ -93,15 +96,22 @@ def _is_dashboard_queued_message(content: object) -> bool:
     return isinstance(content, dict) and content.get("source") == "dashboard"
 
 
-def _message_update(content_blocks: list[dict[str, Any]], thread_id: str) -> dict[str, Any] | None:
-    if not content_blocks:
+def _message_update(
+    message_blocks: list[list[dict[str, Any]]], thread_id: str
+) -> dict[str, Any] | None:
+    message_blocks = [blocks for blocks in message_blocks if blocks]
+    if not message_blocks:
         return None
     logger.info(
-        "Injected %d queued message block(s) into state for thread %s",
-        len(content_blocks),
+        "Injected %d queued message(s) into state for thread %s",
+        len(message_blocks),
         thread_id,
     )
-    return {"messages": [{"role": "user", "content": content_blocks}]}
+    return {
+        "messages": [
+            {"role": "user", "content": content_blocks} for content_blocks in message_blocks
+        ]
+    }
 
 
 async def _consume_pending_autofix_event(store: BaseStore, thread_id: str) -> str | None:
@@ -167,10 +177,10 @@ async def check_message_queue_before_model(  # noqa: PLR0911
         if store is None:
             return None
 
-        content_blocks: list[dict[str, Any]] = []
+        message_blocks: list[list[dict[str, Any]]] = []
         pending_autofix = await _consume_pending_autofix_event(store, thread_id)
         if pending_autofix:
-            content_blocks.append({"type": "text", "text": pending_autofix})
+            message_blocks.append([{"type": "text", "text": pending_autofix}])
 
         namespace = ("queue", thread_id)
 
@@ -178,10 +188,10 @@ async def check_message_queue_before_model(  # noqa: PLR0911
             queued_item = await store.aget(namespace, "pending_messages")
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to get queued item: %s", e)
-            return _message_update(content_blocks, thread_id)
+            return _message_update(message_blocks, thread_id)
 
         if queued_item is None:
-            return _message_update(content_blocks, thread_id)
+            return _message_update(message_blocks, thread_id)
 
         queued_value = queued_item.value
         queued_messages = queued_value.get("messages", [])
@@ -190,7 +200,7 @@ async def check_message_queue_before_model(  # noqa: PLR0911
         await store.adelete(namespace, "pending_messages")
 
         if not queued_messages:
-            return _message_update(content_blocks, thread_id)
+            return _message_update(message_blocks, thread_id)
 
         logger.info(
             "Found %d queued message(s) for thread %s, injecting into state",
@@ -209,24 +219,28 @@ async def check_message_queue_before_model(  # noqa: PLR0911
 
         for msg in queued_messages:
             content = msg.get("content")
+            content_blocks: list[dict[str, Any]] = []
             if _is_dashboard_queued_message(content):
                 content_blocks.append({"type": "text", "text": DASHBOARD_HANDOFF_INSTRUCTION})
             if isinstance(content, dict) and (
-                "text" in content or "image_urls" in content or "images" in content
+                "text" in content
+                or "image_urls" in content
+                or "images" in content
+                or "files" in content
             ):
-                logger.debug("Queued message contains text + image URLs")
+                logger.debug("Queued message contains structured content blocks")
                 blocks = await _build_blocks_from_payload(content, model_id=resolved_model_id)
                 content_blocks.extend(blocks)
-                continue
-            if isinstance(content, list):
+            elif isinstance(content, list):
                 logger.debug("Queued message contains %d content block(s)", len(content))
                 content_blocks.extend(content)
-                continue
-            if isinstance(content, str) and content:
+            elif isinstance(content, str) and content:
                 logger.debug("Queued message contains text content")
                 content_blocks.append({"type": "text", "text": content})
+            if content_blocks:
+                message_blocks.append(content_blocks)
 
-        return _message_update(content_blocks, thread_id)  # noqa: TRY300
+        return _message_update(message_blocks, thread_id)  # noqa: TRY300
     except Exception:
         logger.exception("Error in check_message_queue_before_model")
     return None

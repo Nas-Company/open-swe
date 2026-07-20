@@ -9,7 +9,13 @@ import type {
   SidebarThreads,
   ThreadsPageParams,
 } from "./api"
-import type { AgentThread, Chunk, ImageChunk, Message } from "./types"
+import type {
+  AgentThread,
+  Chunk,
+  FileChunk,
+  ImageChunk,
+  Message,
+} from "./types"
 
 export const agentThreadKeys = {
   lists: ["agent-threads", "lists"] as const,
@@ -17,6 +23,8 @@ export const agentThreadKeys = {
     ["agent-threads", "lists", "sidebar", params] as const,
   detail: (threadId: string) => ["agent-threads", threadId] as const,
   prDiff: (threadId: string) => ["agent-threads", threadId, "pr-diff"] as const,
+  artifacts: (threadId: string) =>
+    ["agent-threads", threadId, "artifacts"] as const,
   page: (params: ThreadsPageParams) =>
     ["agent-threads", "lists", "page", params] as const,
 }
@@ -125,6 +133,18 @@ export function useAgentThreadPrDiff(threadId: string, enabled: boolean) {
   })
 }
 
+export function useAgentThreadArtifacts(
+  threadId: string,
+  isStreaming: boolean
+) {
+  return useQuery({
+    queryKey: agentThreadKeys.artifacts(threadId),
+    queryFn: () => agentsApi.listThreadArtifacts(threadId),
+    refetchInterval: isStreaming ? 2000 : false,
+    retry: 1,
+  })
+}
+
 export function useAgentSchedules() {
   return useQuery({
     queryKey: agentScheduleKeys.all,
@@ -169,6 +189,7 @@ export function useDeleteAgentSchedule() {
 export interface CreateAgentThreadVariables {
   prompt: string
   images?: Array<ImageChunk>
+  files?: Array<FileChunk>
   repo?: string | null
   repo_explicitly_none?: boolean
   model_id?: string | null
@@ -193,6 +214,7 @@ export function optimisticThread(
   const repoFullName = vars.repo ?? ""
   const chunks: Array<Chunk> = [
     ...(vars.images ?? []),
+    ...(vars.files ?? []),
     ...(text ? [{ kind: "text", text } satisfies Chunk] : []),
   ]
   const message: Message = {
@@ -225,6 +247,7 @@ export function optimisticThread(
 export interface SendAgentMessageVariables {
   content: string
   images?: Array<ImageChunk>
+  files?: Array<FileChunk>
   model_id?: string | null
   effort?: string | null
   plan_mode?: boolean

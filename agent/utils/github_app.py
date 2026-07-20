@@ -30,7 +30,16 @@ RUNTIME_PROXY_TOKEN_PERMISSIONS: dict[str, str] = {
     "contents": "write",
     "pull_requests": "write",
     "issues": "write",
-    "checks": "write",
+}
+READ_ONLY_SANDBOX_TOKEN_PERMISSIONS: dict[str, str] = {
+    "contents": "read",
+    "pull_requests": "read",
+    "issues": "read",
+}
+REVIEWER_API_TOKEN_PERMISSIONS: dict[str, str] = {
+    "contents": "read",
+    "pull_requests": "write",
+    "issues": "write",
 }
 WORKFLOW_RUNTIME_PROXY_TOKEN_PERMISSIONS: dict[str, str] = {
     **RUNTIME_PROXY_TOKEN_PERMISSIONS,
