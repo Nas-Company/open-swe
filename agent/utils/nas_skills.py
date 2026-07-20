@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import posixpath
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,14 @@ async def materialize_nas_skills(
     work_dir: str,
 ) -> list[str]:
     uploads = bundled_skill_uploads(work_dir)
+    directories = sorted({posixpath.dirname(path) for path, _ in uploads})
+    mkdir_result = await backend.aexecute(
+        "mkdir -p " + " ".join(shlex.quote(directory) for directory in directories)
+    )
+    if mkdir_result.exit_code != 0:
+        detail = mkdir_result.output.strip() or f"exit code {mkdir_result.exit_code}"
+        raise RuntimeError(f"Failed to materialize NAS skills: mkdir failed: {detail}")
+
     responses = await backend.aupload_files(uploads)
     if len(responses) != len(uploads):
         raise RuntimeError("Failed to materialize NAS skills: incomplete file upload response")

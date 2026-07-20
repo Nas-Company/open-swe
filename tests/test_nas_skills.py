@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
+from deepagents.backends.protocol import ExecuteResponse
 
 from agent.utils.nas_skills import materialize_nas_skills
 
@@ -17,6 +18,11 @@ class FakeBackend:
     def __init__(self, error: str | None = None) -> None:
         self.error = error
         self.uploads: list[tuple[str, bytes]] = []
+        self.commands: list[str] = []
+
+    async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        self.commands.append(command)
+        return ExecuteResponse(output="", exit_code=0, truncated=False)
 
     async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[UploadResult]:
         self.uploads = files
@@ -45,6 +51,19 @@ async def test_materialize_nas_skills_uploads_bundle_and_version_marker() -> Non
     assert sources == ["/workspace/.open-swe/skills/"]
     assert paths == sorted(paths)
     assert "/workspace/.open-swe/skills/.bundle-sha256" in paths
+
+
+@pytest.mark.asyncio
+async def test_materialize_nas_skills_creates_upload_directories_first() -> None:
+    backend = FakeBackend()
+
+    await materialize_nas_skills(backend, "/workspace")  # type: ignore[arg-type]
+
+    assert backend.commands == [
+        "mkdir -p /workspace/.open-swe/skills "
+        "/workspace/.open-swe/skills/product-live-issue-debugger "
+        "/workspace/.open-swe/skills/product-live-issue-debugger/references"
+    ]
 
 
 @pytest.mark.asyncio
