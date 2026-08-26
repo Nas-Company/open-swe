@@ -35,11 +35,6 @@ from agent.utils.lark import (
     reply_to_lark_message,
 )
 from agent.utils.lark_events import get_lark_event_record, mark_lark_event_dispatched
-from agent.utils.thread_ops import (
-    get_thread_active_status,
-    queue_message_for_thread,
-    queued_message_exists,
-)
 from agent.webapp import (
     _AGENT_VERSION_METADATA,
     LANGGRAPH_URL,
@@ -264,25 +259,6 @@ async def process_lark_mention(event: LarkEvent) -> None:
         if existing_run_id:
             await mark_lark_event_dispatched(event.event_id, existing_run_id)
             return
-        if await queued_message_exists(thread_id, event.event_id):
-            await mark_lark_event_dispatched(event.event_id, "queued")
-            return
-
-    if await get_thread_active_status(thread_id):
-        queued = await queue_message_for_thread(
-            thread_id,
-            {"source": "lark", "text": prompt, "images": image_blocks},
-            dedupe_id=event.event_id,
-        )
-        if not queued:
-            raise RuntimeError("failed to queue Lark follow-up")
-        await reply_to_lark_message(
-            message.root_message_id,
-            {"text": "I added your follow-up to the active Open SWE run."},
-        )
-        await mark_lark_event_dispatched(event.event_id, "queued")
-        return
-
     await reply_to_lark_message(
         message.root_message_id,
         {"text": f"Working on `{repo['owner']}/{repo['name']}` now."},
@@ -610,12 +586,6 @@ async def _dispatch_lark_followup(
     }
     if await _lark_followup_exists(client, thread_id, action_id):
         return True
-    if plan_mode is None and await get_thread_active_status(thread_id):
-        return await queue_message_for_thread(
-            thread_id,
-            {"source": "lark", "text": text},
-            dedupe_id=action_id,
-        )
     run = await dispatch_agent_run(
         thread_id,
         text,
@@ -628,8 +598,6 @@ async def _dispatch_lark_followup(
 
 
 async def _lark_followup_exists(client: object, thread_id: str, action_id: str) -> bool:
-    if await queued_message_exists(thread_id, action_id):
-        return True
     runs = await client.runs.list(thread_id, limit=100)
     for run in runs if isinstance(runs, list) else []:
         metadata = run.get("metadata") if isinstance(run, dict) else None

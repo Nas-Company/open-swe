@@ -18,7 +18,6 @@ from langgraph_sdk import get_client
 logger = logging.getLogger(__name__)
 
 MAX_QUEUED_MESSAGES = 100
-QUEUE_RECEIPT_TTL_MINUTES = 10080
 
 
 def langgraph_url() -> str:
@@ -44,10 +43,7 @@ async def get_thread_active_status(thread_id: str) -> bool | None:
 
 
 async def queue_message_for_thread(
-    thread_id: str,
-    message_content: str | list[dict[str, Any]] | dict[str, Any],
-    *,
-    dedupe_id: str | None = None,
+    thread_id: str, message_content: str | list[dict[str, Any]] | dict[str, Any]
 ) -> bool:
     """Queue a follow-up message for a busy thread (FIFO store namespace).
 
@@ -59,11 +55,6 @@ async def queue_message_for_thread(
         namespace = ("queue", thread_id)
         key = "pending_messages"
         new_message = {"content": message_content}
-        if dedupe_id:
-            receipt = await client.store.get_item(("queue_receipts", thread_id), dedupe_id)
-            if receipt is not None:
-                return True
-            new_message["dedupe_id"] = dedupe_id
 
         existing_messages: list[dict[str, Any]] = []
         try:
@@ -73,8 +64,6 @@ async def queue_message_for_thread(
         except Exception:  # noqa: BLE001
             logger.debug("No existing queued messages for thread %s", thread_id)
 
-        if dedupe_id and any(item.get("dedupe_id") == dedupe_id for item in existing_messages):
-            return True
         existing_messages.append(new_message)
         if len(existing_messages) > MAX_QUEUED_MESSAGES:
             existing_messages = existing_messages[-MAX_QUEUED_MESSAGES:]
@@ -93,21 +82,3 @@ async def queue_message_for_thread(
     except Exception:
         logger.exception("Failed to queue message for thread %s", thread_id)
         return False
-
-
-async def queued_message_exists(thread_id: str, dedupe_id: str) -> bool:
-    if not dedupe_id:
-        return False
-    try:
-        client = langgraph_client()
-        receipt = await client.store.get_item(("queue_receipts", thread_id), dedupe_id)
-        if receipt is not None:
-            return True
-        item = await client.store.get_item(("queue", thread_id), "pending_messages")
-    except Exception:  # noqa: BLE001
-        return False
-    value = item.get("value") if isinstance(item, dict) else None
-    messages = value.get("messages") if isinstance(value, dict) else None
-    return isinstance(messages, list) and any(
-        isinstance(message, dict) and message.get("dedupe_id") == dedupe_id for message in messages
-    )

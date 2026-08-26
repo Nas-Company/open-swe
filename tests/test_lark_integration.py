@@ -144,7 +144,6 @@ async def test_lark_event_to_agent_to_threaded_reply_and_replay(
         "download_lark_image",
         AsyncMock(return_value=b"\x89PNG\r\n\x1a\nimage"),
     )
-    monkeypatch.setattr(lark_webhook, "get_thread_active_status", AsyncMock(return_value=False))
     monkeypatch.setattr(lark_webhook, "upsert_agent_thread_owner_metadata", AsyncMock())
     monkeypatch.setattr(lark_webhook, "get_client", lambda **_kwargs: SimpleNamespace())
     ingress_replies = AsyncMock(return_value=MagicMock(ok=True, message_id="om-working"))

@@ -20,7 +20,6 @@ from langgraph_sdk import get_client
 from ..dashboard.options import model_supports_images
 from ..utils.http import DEFAULT_HTTP_TIMEOUT
 from ..utils.multimodal import fetch_image_block, vision_not_supported_warning
-from ..utils.thread_ops import QUEUE_RECEIPT_TTL_MINUTES
 
 logger = logging.getLogger(__name__)
 
@@ -196,16 +195,6 @@ async def check_message_queue_before_model(  # noqa: PLR0911
 
         queued_value = queued_item.value
         queued_messages = queued_value.get("messages", [])
-
-        for message in queued_messages:
-            dedupe_id = message.get("dedupe_id") if isinstance(message, dict) else None
-            if isinstance(dedupe_id, str) and dedupe_id:
-                await store.aput(
-                    ("queue_receipts", thread_id),
-                    dedupe_id,
-                    {"consumed": True},
-                    ttl=QUEUE_RECEIPT_TTL_MINUTES,
-                )
 
         # Delete early to prevent duplicate processing if middleware runs again
         await store.adelete(namespace, "pending_messages")

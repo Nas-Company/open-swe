@@ -105,8 +105,6 @@ def _configure(
     monkeypatch.setattr(lark_webhook, "get_client", lambda **_kwargs: client)
     monkeypatch.setattr(lark_webhook, "login_for_lark_id", AsyncMock(return_value="alice"))
     monkeypatch.setattr(lark_webhook, "dispatch_agent_run", dispatch)
-    monkeypatch.setattr(lark_webhook, "get_thread_active_status", AsyncMock(return_value=False))
-    monkeypatch.setattr(lark_webhook, "queue_message_for_thread", AsyncMock(return_value=True))
     monkeypatch.setattr(lark_webhook, "_release_lark_action_claim", AsyncMock())
     monkeypatch.setattr(lark_webhook, "_lark_followup_exists", AsyncMock(return_value=False))
     monkeypatch.setattr(lark_webhook, "_claim_lark_action_once", AsyncMock(return_value=True))
@@ -312,9 +310,6 @@ async def test_active_plan_approval_interrupts_with_non_plan_configuration(
         }
     }
     _, dispatch = _configure(monkeypatch, metadata)
-    queue = AsyncMock(return_value=True)
-    monkeypatch.setattr(lark_webhook, "get_thread_active_status", AsyncMock(return_value=True))
-    monkeypatch.setattr(lark_webhook, "queue_message_for_thread", queue)
     action = _action()
     action["event"]["action"]["value"]["type"] = "plan_approval"
 
@@ -323,23 +318,18 @@ async def test_active_plan_approval_interrupts_with_non_plan_configuration(
     assert result["toast"]["type"] == "success"
     dispatch.assert_awaited_once()
     assert dispatch.await_args.args[2]["plan_mode"] is False
-    queue.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_active_thread_queues_card_followup_instead_of_interrupting(
+async def test_card_followup_uses_durable_interrupting_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, dispatch = _configure(monkeypatch, _metadata())
-    queue = AsyncMock(return_value=True)
-    monkeypatch.setattr(lark_webhook, "get_thread_active_status", AsyncMock(return_value=True))
-    monkeypatch.setattr(lark_webhook, "queue_message_for_thread", queue)
 
     result = await lark_webhook.process_lark_card_action(_action())
 
     assert result["toast"]["type"] == "success"
-    queue.assert_awaited_once()
-    dispatch.assert_not_awaited()
+    dispatch.assert_awaited_once()
 
 
 @pytest.mark.asyncio
