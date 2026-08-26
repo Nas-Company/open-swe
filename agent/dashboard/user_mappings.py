@@ -71,9 +71,9 @@ def _norm_lark_id(value: str | None) -> str:
 
 _cache_lock = threading.RLock()
 _by_login: dict[str, dict[str, Any]] = {}
-_by_email: dict[str, dict[str, Any]] = {}
+_by_email: dict[str, dict[str, dict[str, Any]]] = {}
 _by_slack_id: dict[str, dict[str, Any]] = {}
-_by_lark_id: dict[tuple[str, str], dict[str, Any]] = {}
+_by_lark_id: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
 _cache_loaded = False
 
 
@@ -83,16 +83,18 @@ def _index_record(record: dict[str, Any]) -> None:
         return
     with _cache_lock:
         _by_login[login.lower()] = record
+        if record.get("status", "active") != "active":
+            return
         email = _norm_email(record.get("work_email"))
         if email:
-            _by_email[email] = record
+            _by_email.setdefault(email, {})[login.lower()] = record
         slack_id = _norm_slack_id(record.get("slack_user_id"))
         if slack_id:
             _by_slack_id[slack_id] = record
         tenant_key = _norm_lark_id(record.get("lark_tenant_key"))
         open_id = _norm_lark_id(record.get("lark_open_id"))
         if tenant_key and open_id:
-            _by_lark_id[(tenant_key, open_id)] = record
+            _by_lark_id.setdefault((tenant_key, open_id), {})[login.lower()] = record
 
 
 def _deindex_login(login: str) -> None:
@@ -101,15 +103,21 @@ def _deindex_login(login: str) -> None:
         if not existing:
             return
         email = _norm_email(existing.get("work_email"))
-        if email and _by_email.get(email) is existing:
-            _by_email.pop(email, None)
+        email_records = _by_email.get(email)
+        if email_records:
+            email_records.pop(login.lower(), None)
+            if not email_records:
+                _by_email.pop(email, None)
         slack_id = _norm_slack_id(existing.get("slack_user_id"))
         if slack_id and _by_slack_id.get(slack_id) is existing:
             _by_slack_id.pop(slack_id, None)
         tenant_key = _norm_lark_id(existing.get("lark_tenant_key"))
         open_id = _norm_lark_id(existing.get("lark_open_id"))
-        if tenant_key and open_id and _by_lark_id.get((tenant_key, open_id)) is existing:
-            _by_lark_id.pop((tenant_key, open_id), None)
+        lark_records = _by_lark_id.get((tenant_key, open_id))
+        if lark_records:
+            lark_records.pop(login.lower(), None)
+            if not lark_records:
+                _by_lark_id.pop((tenant_key, open_id), None)
 
 
 def prime_cache(records: list[dict[str, Any]]) -> None:
@@ -158,7 +166,8 @@ def cached_login_for_email(email: str | None) -> str | None:
     if not norm:
         return None
     with _cache_lock:
-        record = _by_email.get(norm)
+        records = _by_email.get(norm, {})
+        record = next(iter(records.values())) if len(records) == 1 else None
     return _norm_login(record.get("github_login")) or None if record else None
 
 
@@ -180,7 +189,8 @@ def cached_login_for_lark_id(
     if not tenant or not user:
         return None
     with _cache_lock:
-        record = _by_lark_id.get((tenant, user))
+        records = _by_lark_id.get((tenant, user), {})
+        record = next(iter(records.values())) if len(records) == 1 else None
     return _norm_login(record.get("github_login")) or None if record else None
 
 

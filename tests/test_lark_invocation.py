@@ -100,6 +100,18 @@ def test_context_starts_at_previous_mention_and_ignores_bot_messages() -> None:
     assert [message.message_id for message in context] == ["om-previous", "om-current"]
 
 
+def test_context_does_not_treat_plain_mention_text_as_structured_mention() -> None:
+    messages = [
+        _message("original context", message_id="om-root", mentions=()),
+        _message("someone typed @openswe literally", message_id="om-text", mentions=()),
+        _message("current", message_id="om-current", mentions=()),
+    ]
+
+    context = lark_webhook.select_lark_context(messages, "om-current")
+
+    assert [message.message_id for message in context] == ["om-root", "om-text", "om-current"]
+
+
 def _configure_happy_path(monkeypatch: pytest.MonkeyPatch, event: LarkEvent) -> dict[str, object]:
     calls: dict[str, object] = {}
     monkeypatch.setattr(
@@ -157,9 +169,37 @@ def _configure_happy_path(monkeypatch: pytest.MonkeyPatch, event: LarkEvent) -> 
         return {"run_id": "run-1"}
 
     monkeypatch.setattr(lark_webhook, "dispatch_agent_run", dispatch)
+    monkeypatch.setattr(lark_webhook, "get_lark_event_record", AsyncMock(return_value=None))
     monkeypatch.setattr(lark_webhook, "reply_to_lark_message", AsyncMock())
     monkeypatch.setattr(lark_webhook, "mark_lark_event_dispatched", AsyncMock())
     return calls
+
+
+@pytest.mark.asyncio
+async def test_retry_reconciles_existing_event_run_without_dispatching_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = _event(text="review https://github.com/Nas-Company/nas-e2e")
+    calls = _configure_happy_path(monkeypatch, event)
+    monkeypatch.setattr(
+        lark_webhook,
+        "get_lark_event_record",
+        AsyncMock(return_value=SimpleNamespace(attempts=2)),
+    )
+    runs = SimpleNamespace(
+        list=AsyncMock(
+            return_value=[{"run_id": "run-existing", "metadata": {"lark_event_id": event.event_id}}]
+        )
+    )
+    monkeypatch.setattr(lark_webhook, "get_client", lambda **_kwargs: SimpleNamespace(runs=runs))
+    dispatch = AsyncMock()
+    monkeypatch.setattr(lark_webhook, "dispatch_agent_run", dispatch)
+
+    await lark_webhook.process_lark_mention(event)
+
+    dispatch.assert_not_awaited()
+    lark_webhook.mark_lark_event_dispatched.assert_awaited_once_with(event.event_id, "run-existing")
+    assert "thread_id" not in calls
 
 
 @pytest.mark.asyncio
@@ -249,6 +289,31 @@ async def test_oversized_image_is_skipped_with_warning(monkeypatch: pytest.Monke
     text = json.dumps(content)
     assert "too large" in text
     assert '"type": "image"' not in text
+
+
+@pytest.mark.asyncio
+async def test_failed_image_download_preserves_text_and_remaining_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = _event(
+        text="review https://github.com/Nas-Company/nas-e2e",
+        image_keys=("expired", "valid"),
+    )
+    calls = _configure_happy_path(monkeypatch, event)
+
+    async def download(_message_id: str, image_key: str) -> bytes:
+        if image_key == "expired":
+            raise RuntimeError("expired")
+        return b"\x89PNG\r\n\x1a\nimage"
+
+    monkeypatch.setattr(lark_webhook, "download_lark_image", download)
+
+    await lark_webhook.process_lark_mention(event)
+
+    content = calls["content"]
+    assert isinstance(content, list)
+    assert any(block.get("type") == "image" for block in content)
+    assert "could not be downloaded" in json.dumps(content)
 
 
 @pytest.mark.asyncio

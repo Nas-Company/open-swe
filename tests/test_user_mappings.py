@@ -72,6 +72,23 @@ async def test_pending_status_not_trusted(fake_store: _FakeStore) -> None:
     um.clear_cache()
     await um.refresh_cache()
     assert um.is_login_mapped("newbie") is False
+    assert await um.login_for_email("n@x.com") is None
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_active_email_and_lark_id_fail_closed(fake_store: _FakeStore) -> None:
+    for login in ("one", "two"):
+        await um.upsert_mapping(
+            github_login=login,
+            work_email="shared@x.com",
+            lark_tenant_key="tenant",
+            lark_open_id="ou_shared",
+        )
+    um.clear_cache()
+    await um.refresh_cache()
+
+    assert await um.login_for_email("shared@x.com") is None
+    assert await um.login_for_lark_id("tenant", "ou_shared") is None
 
 
 @pytest.mark.asyncio

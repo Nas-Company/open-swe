@@ -105,6 +105,9 @@ def _configure(
     monkeypatch.setattr(lark_webhook, "get_client", lambda **_kwargs: client)
     monkeypatch.setattr(lark_webhook, "login_for_lark_id", AsyncMock(return_value="alice"))
     monkeypatch.setattr(lark_webhook, "dispatch_agent_run", dispatch)
+    monkeypatch.setattr(lark_webhook, "get_thread_active_status", AsyncMock(return_value=False))
+    monkeypatch.setattr(lark_webhook, "queue_message_for_thread", AsyncMock(return_value=True))
+    monkeypatch.setattr(lark_webhook, "_release_lark_action_claim", AsyncMock())
     monkeypatch.setattr(lark_webhook, "_claim_lark_action_once", AsyncMock(return_value=True))
     monkeypatch.setattr(
         lark_webhook,
@@ -271,6 +274,59 @@ async def test_plan_owner_approval_resumes_once(monkeypatch: pytest.MonkeyPatch)
     assert replay["toast"]["type"] == "error"
     dispatch.assert_awaited_once()
     assert metadata["lark_plan_approvals"][FINGERPRINT]["status"] == "approved"
+    assert dispatch.await_args.args[2]["plan_mode"] is False
+
+
+@pytest.mark.asyncio
+async def test_plan_rejection_preserves_plan_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    metadata = _metadata()
+    metadata["lark_plan_approvals"] = {
+        FINGERPRINT: {
+            "fingerprint": FINGERPRINT,
+            "status": "pending",
+            "requested_at": datetime.now(UTC).isoformat(),
+        }
+    }
+    _, dispatch = _configure(monkeypatch, metadata)
+    action = _action(action="reject")
+    action["event"]["action"]["value"]["type"] = "plan_approval"
+
+    result = await lark_webhook.process_lark_card_action(action)
+
+    assert result["toast"]["type"] == "success"
+    assert dispatch.await_args.args[2]["plan_mode"] is True
+
+
+@pytest.mark.asyncio
+async def test_active_thread_queues_card_followup_instead_of_interrupting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, dispatch = _configure(monkeypatch, _metadata())
+    queue = AsyncMock(return_value=True)
+    monkeypatch.setattr(lark_webhook, "get_thread_active_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(lark_webhook, "queue_message_for_thread", queue)
+
+    result = await lark_webhook.process_lark_card_action(_action())
+
+    assert result["toast"]["type"] == "success"
+    queue.assert_awaited_once()
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_saved_workflow_decision_can_retry_failed_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = _metadata()
+    _, dispatch = _configure(monkeypatch, metadata)
+    dispatch.side_effect = [{}, {"run_id": "run-retry"}]
+
+    first = await lark_webhook.process_lark_card_action(_action())
+    retry = await lark_webhook.process_lark_card_action(_action())
+
+    assert first["toast"]["type"] == "error"
+    assert retry["toast"]["type"] == "success"
+    assert dispatch.await_count == 2
 
 
 @pytest.mark.asyncio

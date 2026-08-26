@@ -52,10 +52,11 @@ async def claim_lark_event(event_id: str, thread_id: str) -> ClaimResult:
         record = await _get_record(event_id)
         if record is None:
             claimed = _new_claim(event_id, thread_id, attempts=1)
-            if not await _acquire_attempt_claim(event_id, 1):
-                return ClaimResult("in_progress", claimed)
-            await _put_record(claimed)
-            return ClaimResult("claimed", claimed)
+            if await _acquire_attempt_claim(event_id, thread_id, 1, record=claimed):
+                await _put_record(claimed)
+                return ClaimResult("claimed", claimed)
+            record = await _get_attempt_claim_record(event_id, 1) or claimed
+            await _put_record(record)
 
         if record.status == "dispatched":
             return ClaimResult("dispatched", record)
@@ -66,20 +67,40 @@ async def claim_lark_event(event_id: str, thread_id: str) -> ClaimResult:
 
         next_attempt = record.attempts + 1
         claimed = _new_claim(event_id, thread_id, attempts=next_attempt)
-        if not await _acquire_attempt_claim(event_id, next_attempt):
+        if not await _acquire_attempt_claim(
+            event_id,
+            thread_id,
+            next_attempt,
+            record=claimed,
+        ):
             latest = await _get_record(event_id)
             return ClaimResult("in_progress", latest or claimed)
         await _put_record(claimed)
         return ClaimResult("claimed", claimed)
 
 
-async def _acquire_attempt_claim(event_id: str, attempt: int) -> bool:
-    claim_id = str(uuid5(NAMESPACE_URL, f"open-swe:lark-event:{event_id}:attempt:{attempt}"))
+async def get_lark_event_record(event_id: str) -> LarkEventRecord | None:
+    return await _get_record(event_id)
+
+
+def _attempt_claim_id(event_id: str, attempt: int) -> str:
+    return str(uuid5(NAMESPACE_URL, f"open-swe:lark-event:{event_id}:attempt:{attempt}"))
+
+
+async def _acquire_attempt_claim(
+    event_id: str,
+    thread_id: str,
+    attempt: int,
+    *,
+    record: LarkEventRecord | None = None,
+) -> bool:
+    claim_id = _attempt_claim_id(event_id, attempt)
+    record = record or _new_claim(event_id, thread_id, attempts=attempt)
     try:
         await _client().threads.create(
             thread_id=claim_id,
             if_exists="raise",
-            metadata={"kind": "lark_internal_claim", "event_id": event_id, "attempt": attempt},
+            metadata={"kind": "lark_internal_claim", "lark_event_record": asdict(record)},
             ttl=10080,
         )
         return True
@@ -89,6 +110,16 @@ async def _acquire_attempt_claim(event_id: str, attempt: int) -> bool:
         if status_code == 409 or getattr(response, "status_code", None) == 409:
             return False
         raise
+
+
+async def _get_attempt_claim_record(event_id: str, attempt: int) -> LarkEventRecord | None:
+    try:
+        thread = await _client().threads.get(_attempt_claim_id(event_id, attempt))
+    except Exception:  # noqa: BLE001
+        return None
+    metadata = thread.get("metadata") if isinstance(thread, dict) else None
+    value = metadata.get("lark_event_record") if isinstance(metadata, dict) else None
+    return _record_from_value(value) if isinstance(value, dict) else None
 
 
 async def mark_lark_event_dispatched(event_id: str, run_id: str) -> LarkEventRecord:

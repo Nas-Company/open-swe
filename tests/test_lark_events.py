@@ -38,13 +38,18 @@ class _ConflictError(Exception):
 
 class _FakeThreads:
     def __init__(self) -> None:
-        self.ids: set[str] = set()
+        self.items: dict[str, dict[str, Any]] = {}
 
-    async def create(self, *, thread_id: str, **_kwargs: Any) -> dict[str, str]:
-        if thread_id in self.ids:
+    async def create(
+        self, *, thread_id: str, metadata: dict[str, Any] | None = None, **_kwargs: Any
+    ) -> dict[str, str]:
+        if thread_id in self.items:
             raise _ConflictError
-        self.ids.add(thread_id)
+        self.items[thread_id] = {"thread_id": thread_id, "metadata": metadata or {}}
         return {"thread_id": thread_id}
+
+    async def get(self, thread_id: str) -> dict[str, Any]:
+        return self.items[thread_id]
 
 
 @pytest.fixture
@@ -63,11 +68,30 @@ def fake_store(monkeypatch: pytest.MonkeyPatch) -> _FakeStore:
 @pytest.mark.asyncio
 async def test_attempt_claim_is_atomic_across_processes(fake_store: _FakeStore) -> None:
     first, second = await asyncio.gather(
-        lark_events._acquire_attempt_claim("evt-1", 1),
-        lark_events._acquire_attempt_claim("evt-1", 1),
+        lark_events._acquire_attempt_claim("evt-1", "thread-1", 1),
+        lark_events._acquire_attempt_claim("evt-1", "thread-1", 1),
     )
 
     assert sorted((first, second)) == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_missing_store_record_recovers_from_durable_claim(
+    fake_store: _FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = datetime(2026, 8, 26, 1, 0, tzinfo=UTC)
+    monkeypatch.setattr(lark_events, "_now", lambda: current)
+    assert await lark_events._acquire_attempt_claim("evt-crash", "thread-1", 1)
+
+    in_progress = await claim_lark_event("evt-crash", "thread-1")
+    assert in_progress.status == "in_progress"
+    assert in_progress.record.attempts == 1
+
+    current += timedelta(seconds=lark_events.LARK_EVENT_CLAIM_TIMEOUT_SECONDS + 1)
+    reclaimed = await claim_lark_event("evt-crash", "thread-1")
+    assert reclaimed.status == "claimed"
+    assert reclaimed.record.attempts == 2
 
 
 @pytest.mark.asyncio
