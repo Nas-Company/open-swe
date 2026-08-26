@@ -121,6 +121,26 @@ async def test_update_deindexes_stale_email_and_slack_id(fake_store: _FakeStore)
 
 
 @pytest.mark.asyncio
+async def test_github_oauth_refresh_preserves_existing_slack_link(fake_store: _FakeStore) -> None:
+    await um.upsert_mapping(
+        github_login="jimbo23",
+        work_email="old@nas.io",
+        slack_user_id="U123",
+        source="slack_oauth",
+    )
+
+    record = await um.upsert_mapping(
+        github_login="jimbo23",
+        work_email="techshare@nas.io",
+        source="github_oauth",
+    )
+
+    assert record["slack_user_id"] == "U123"
+    assert record["source"] == "github_oauth"
+    assert await um.login_for_slack_id("U123") == "jimbo23"
+
+
+@pytest.mark.asyncio
 async def test_upsert_requires_login_and_email(fake_store: _FakeStore) -> None:
     with pytest.raises(ValueError):
         await um.upsert_mapping(github_login="", work_email="x@x.com")

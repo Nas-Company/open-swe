@@ -7,6 +7,7 @@ import importlib
 import json
 import logging
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agent import webapp
@@ -1064,7 +1065,7 @@ async def test_request_pr_review_tool_uses_shared_trigger(monkeypatch) -> None:
     assert result["success"] is True
 
 
-def test_process_github_pr_comment_without_email_skips(
+def test_process_github_pr_comment_without_email_uses_app_token(
     monkeypatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -1091,11 +1092,18 @@ def test_process_github_pr_comment_without_email_skips(
     async def fake_trigger_or_queue_run(*args, **kwargs) -> None:
         captured["triggered"] = {"args": args, "kwargs": kwargs}
 
+    async def fake_get_or_resolve_thread_github_token(thread_id: str, email: str) -> str | None:
+        captured["token_email"] = email
+        return "app-token"
+
     monkeypatch.setattr(webapp, "extract_pr_context", fake_extract_pr_context)
     monkeypatch.setattr(webapp, "email_for_login", lambda login: asyncio.sleep(0, result=None))
     monkeypatch.setattr(webapp, "react_to_github_comment", fake_react)
     monkeypatch.setattr(webapp, "fetch_pr_comments_since_last_tag", fake_fetch_comments)
     monkeypatch.setattr(webapp, "_trigger_or_queue_run", fake_trigger_or_queue_run)
+    monkeypatch.setattr(
+        webapp, "_get_or_resolve_thread_github_token", fake_get_or_resolve_thread_github_token
+    )
 
     asyncio.run(
         webapp.process_github_pr_comment(
@@ -1107,16 +1115,29 @@ def test_process_github_pr_comment_without_email_skips(
         )
     )
 
-    assert captured == {}
+    assert captured["token_email"] == ""
+    assert captured["reaction_token"] == "app-token"
+    assert captured["fetch_token"] == "app-token"
+    assert "triggered" in captured
 
 
-def test_process_github_issue_uses_resolved_user_token_for_reaction(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("mapped_email", "resolved_token"),
+    [
+        ("octocat@example.com", "user-token"),
+        (None, "app-token"),
+    ],
+    ids=["mapped-user", "unmapped-app-fallback"],
+)
+def test_process_github_issue_uses_resolved_token_for_reaction(
+    monkeypatch, mapped_email: str | None, resolved_token: str
+) -> None:
     captured: dict[str, object] = {}
 
     async def fake_get_or_resolve_thread_github_token(thread_id: str, email: str) -> str | None:
         captured["thread_id"] = thread_id
         captured["email"] = email
-        return "user-token"
+        return resolved_token
 
     async def fake_get_github_app_installation_token() -> str | None:
         return None
@@ -1160,9 +1181,7 @@ def test_process_github_issue_uses_resolved_user_token_for_reaction(monkeypatch)
     monkeypatch.setattr(
         webapp,
         "email_for_login",
-        lambda login: asyncio.sleep(
-            0, result="octocat@example.com" if login == "octocat" else None
-        ),
+        lambda login: asyncio.sleep(0, result=mapped_email if login == "octocat" else None),
     )
 
     asyncio.run(
@@ -1183,8 +1202,9 @@ def test_process_github_issue_uses_resolved_user_token_for_reaction(monkeypatch)
         )
     )
 
-    assert captured["reaction_token"] == "user-token"
-    assert captured["fetch_token"] == "user-token"
+    assert captured["email"] == (mapped_email or "")
+    assert captured["reaction_token"] == resolved_token
+    assert captured["fetch_token"] == resolved_token
     assert captured["comment_id"] == 999
     assert captured["run_created"] is True
 
@@ -1270,6 +1290,31 @@ def test_process_github_issue_existing_thread_uses_followup_prompt(monkeypatch) 
 
     assert captured["prompt"] == "**octocat:**\n@openswe please handle this"
     assert "## Repository" not in captured["prompt"]
+
+
+def test_process_github_issue_without_user_or_app_token_stops(monkeypatch) -> None:
+    async def no_token(thread_id: str, email: str) -> None:
+        return None
+
+    async def should_not_mint_again() -> None:
+        raise AssertionError("handler should trust the shared resolver")
+
+    monkeypatch.setattr(webapp, "email_for_login", lambda login: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(webapp, "_get_or_resolve_thread_github_token", no_token)
+    monkeypatch.setattr(webapp, "_thread_exists", lambda thread_id: asyncio.sleep(0, result=False))
+    monkeypatch.setattr(webapp, "get_github_app_installation_token", should_not_mint_again)
+
+    asyncio.run(
+        webapp.process_github_issue(
+            {
+                "issue": {"id": 12345, "number": 42, "title": "Fix it"},
+                "comment": {"id": 999, "body": "@openswe please handle this"},
+                "repository": {"owner": {"login": "langchain-ai"}, "name": "open-swe"},
+                "sender": {"login": "external-user"},
+            },
+            "issue_comment",
+        )
+    )
 
 
 def test_github_webhook_routes_pr_comment_review_to_agent(monkeypatch) -> None:

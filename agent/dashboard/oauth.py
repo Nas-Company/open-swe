@@ -340,11 +340,13 @@ async def fetch_github_user(access_token: str) -> tuple[dict[str, Any], str | No
         u = await client.get("https://api.github.com/user", headers=headers)
         u.raise_for_status()
         user = u.json()
-        email = user.get("email")
-        if not email:
-            e = await client.get("https://api.github.com/user/emails", headers=headers)
-            if e.status_code == 200:
-                primary = next((x for x in e.json() if x.get("primary")), None)
-                if primary:
-                    email = primary.get("email")
+        email = None
+        e = await client.get("https://api.github.com/user/emails", headers=headers)
+        if e.status_code == 200:
+            primary = next(
+                (x for x in e.json() if x.get("primary") and x.get("verified")),
+                None,
+            )
+            if primary:
+                email = primary.get("email")
     return user, email
