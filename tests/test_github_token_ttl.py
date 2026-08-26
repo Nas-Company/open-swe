@@ -24,6 +24,7 @@ from agent.utils import github_comments, github_token
 def _clear_token_cache() -> None:
     github_token._GITHUB_TOKEN_CACHE.clear()
     github_token._GITHUB_TOKEN_SOURCES.clear()
+    github_token._GITHUB_TOKEN_PRINCIPALS.clear()
 
 
 # (a) expired-cache reads -----------------------------------------------------
@@ -202,6 +203,71 @@ def test_fetch_issue_comments_raises_on_401(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 # (c) successful re-auth following stale-cache invalidation -------------------
+
+
+@pytest.mark.asyncio
+async def test_thread_token_falls_back_to_github_app_when_user_is_unmapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent import webapp
+
+    monkeypatch.setattr(webapp, "is_bot_token_only_mode", lambda: False)
+    monkeypatch.setattr(
+        webapp,
+        "get_github_token_from_thread",
+        lambda thread_id: _async_pair(None, None),
+    )
+    monkeypatch.setattr(
+        webapp,
+        "resolve_github_token_from_email",
+        lambda email: _async_value({"token": None}),
+    )
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    monkeypatch.setattr(
+        webapp,
+        "get_github_app_installation_token_with_expiry",
+        lambda: _async_pair("app-token", future),
+    )
+
+    token = await webapp._get_or_resolve_thread_github_token("thread-1", "")
+
+    assert token == "app-token"
+    assert github_token.get_github_token({"configurable": {"thread_id": "thread-1"}}) == "app-token"
+    assert github_token.get_github_token_source_for_thread("thread-1") == "app"
+
+
+@pytest.mark.asyncio
+async def test_unmapped_user_never_reuses_another_users_cached_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent import webapp
+
+    github_token.cache_github_token_for_thread(
+        "shared-thread",
+        "alice-token",
+        source="user",
+        principal="alice@example.com",
+    )
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    monkeypatch.setattr(webapp, "is_bot_token_only_mode", lambda: False)
+    monkeypatch.setattr(
+        webapp,
+        "get_github_app_installation_token_with_expiry",
+        lambda: _async_pair("app-token", future),
+    )
+
+    token = await webapp._get_or_resolve_thread_github_token("shared-thread", "")
+
+    assert token == "app-token"
+    assert github_token.get_github_token_source_for_thread("shared-thread") == "app"
+
+
+async def _async_pair(first: Any, second: Any) -> tuple[Any, Any]:
+    return first, second
+
+
+async def _async_value(value: Any) -> Any:
+    return value
 
 
 def test_process_github_pr_comment_invalidates_and_reauths_on_401(

@@ -65,6 +65,7 @@ from .utils.auth import (
 from .utils.comments import get_recent_comments  # noqa: F401
 from .utils.dashboard_links import dashboard_thread_url  # noqa: F401
 from .utils.github_app import (
+    clear_app_token_cache,
     get_github_app_installation_token,  # noqa: F401
     get_github_app_installation_token_with_expiry,
 )
@@ -86,6 +87,8 @@ from .utils.github_org_membership import INTERNAL_BOT_LOGINS, is_user_active_org
 from .utils.github_token import (
     cache_github_token_for_thread,
     get_github_token_from_thread,
+    get_github_token_principal_for_thread,
+    get_github_token_source_for_thread,
     invalidate_cached_github_token,
 )
 from .utils.http import DEFAULT_HTTP_TIMEOUT
@@ -1701,7 +1704,10 @@ async def _refresh_thread_github_token_after_401(thread_id: str, email: str) -> 
         "GitHub returned 401 for thread %s; invalidating cached token and re-resolving",
         thread_id,
     )
+    cached_source = get_github_token_source_for_thread(thread_id)
     await invalidate_cached_github_token(thread_id)
+    if cached_source == "app":
+        clear_app_token_cache()
     return await _get_or_resolve_thread_github_token(thread_id, email)
 
 
@@ -1725,19 +1731,40 @@ async def _get_or_resolve_thread_github_token(thread_id: str, email: str) -> str
         return None
 
     github_token, _expires_at = await get_github_token_from_thread(thread_id)
-    if github_token:
+    cached_source = get_github_token_source_for_thread(thread_id)
+    cached_principal = get_github_token_principal_for_thread(thread_id)
+    normalized_email = email.strip().lower()
+    if github_token and (
+        cached_source == "app"
+        or (cached_source == "user" and normalized_email and cached_principal == normalized_email)
+    ):
         return github_token
 
-    auth_result = await resolve_github_token_from_email(email)
-    github_token = auth_result.get("token")
-    if not github_token:
-        return None
+    if email:
+        auth_result = await resolve_github_token_from_email(email)
+        github_token = auth_result.get("token")
+        if github_token:
+            expires_at = auth_result.get("expires_at")
+            cache_github_token_for_thread(
+                thread_id,
+                github_token,
+                expires_at=expires_at if isinstance(expires_at, str) else None,
+                principal=email,
+            )
+            return github_token
 
-    expires_at = auth_result.get("expires_at")
+    app_token, expires_at = await get_github_app_installation_token_with_expiry()
+    if not app_token:
+        logger.warning("No user OAuth or GitHub App token available for thread %s", thread_id)
+        return None
     cache_github_token_for_thread(
-        thread_id, github_token, expires_at=expires_at if isinstance(expires_at, str) else None
+        thread_id,
+        app_token,
+        expires_at=expires_at,
+        source="app",
     )
-    return github_token
+    logger.info("Using GitHub App token fallback for thread %s", thread_id)
+    return app_token
 
 
 def _finding_comment_ids(finding: Finding) -> set[int]:

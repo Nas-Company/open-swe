@@ -400,6 +400,13 @@ async def auth_callback(request: Request, code: str, state: str) -> RedirectResp
     await enforce_org_login_gate(login)
 
     await upsert_access_token_from_github_response(login, email or "", token_data)
+    if email:
+        await upsert_mapping(
+            github_login=login,
+            work_email=email,
+            source="github_oauth",
+            status="active",
+        )
 
     session_jwt = issue_session(login=login, email=email, avatar_url=user.get("avatar_url"))
     response = RedirectResponse(redirect_to, status_code=302)

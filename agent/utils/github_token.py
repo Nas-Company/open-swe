@@ -21,6 +21,7 @@ _GITHUB_TOKEN_MAX_TTL = timedelta(hours=24)
 _GITHUB_TOKEN_CACHE: dict[str, tuple[str, str | None, datetime]] = {}
 GitHubTokenSource = Literal["user", "app"]
 _GITHUB_TOKEN_SOURCES: dict[str, GitHubTokenSource] = {}
+_GITHUB_TOKEN_PRINCIPALS: dict[str, str] = {}
 
 
 class GitHubAuthError(Exception):
@@ -33,6 +34,7 @@ def cache_github_token_for_thread(
     expires_at: str | None = None,
     *,
     source: GitHubTokenSource = "user",
+    principal: str | None = None,
 ) -> None:
     """Cache a GitHub token in process for the current thread."""
     if not thread_id or not token:
@@ -40,6 +42,11 @@ def cache_github_token_for_thread(
     now = datetime.now(UTC)
     _GITHUB_TOKEN_CACHE[thread_id] = (token, expires_at, now)
     _GITHUB_TOKEN_SOURCES[thread_id] = source
+    normalized_principal = principal.strip().lower() if isinstance(principal, str) else ""
+    if normalized_principal:
+        _GITHUB_TOKEN_PRINCIPALS[thread_id] = normalized_principal
+    else:
+        _GITHUB_TOKEN_PRINCIPALS.pop(thread_id, None)
     _evict_expired(now=now)
 
 
@@ -91,6 +98,7 @@ def _evict_expired(*, now: datetime | None = None) -> None:
     for tid in stale:
         _GITHUB_TOKEN_CACHE.pop(tid, None)
         _GITHUB_TOKEN_SOURCES.pop(tid, None)
+        _GITHUB_TOKEN_PRINCIPALS.pop(tid, None)
 
 
 def _cached_token_if_fresh(thread_id: str | None) -> tuple[str | None, str | None]:
@@ -103,6 +111,7 @@ def _cached_token_if_fresh(thread_id: str | None) -> tuple[str | None, str | Non
     if _entry_expired(expires_at, cached_at, now=datetime.now(UTC)):
         _GITHUB_TOKEN_CACHE.pop(thread_id, None)
         _GITHUB_TOKEN_SOURCES.pop(thread_id, None)
+        _GITHUB_TOKEN_PRINCIPALS.pop(thread_id, None)
         logger.info("Cached GitHub token for thread %s has expired; re-resolving", thread_id)
         return None, None
     return token, expires_at
@@ -136,8 +145,17 @@ def get_github_token_source_for_thread(thread_id: str | None) -> GitHubTokenSour
     return _GITHUB_TOKEN_SOURCES.get(thread_id)
 
 
+def get_github_token_principal_for_thread(thread_id: str | None) -> str | None:
+    if not thread_id or _cached_token_if_fresh(thread_id) == (None, None):
+        if thread_id:
+            _GITHUB_TOKEN_PRINCIPALS.pop(thread_id, None)
+        return None
+    return _GITHUB_TOKEN_PRINCIPALS.get(thread_id)
+
+
 async def invalidate_cached_github_token(thread_id: str) -> None:
     """Clear a cached GitHub token for a thread."""
     _GITHUB_TOKEN_CACHE.pop(thread_id, None)
     _GITHUB_TOKEN_SOURCES.pop(thread_id, None)
+    _GITHUB_TOKEN_PRINCIPALS.pop(thread_id, None)
     logger.info("Invalidated cached GitHub token for thread %s", thread_id)

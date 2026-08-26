@@ -95,6 +95,46 @@ async def test_token_is_cached_until_near_expiry(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
+async def test_app_token_401_clears_both_caches_and_mints_fresh_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent import webapp
+    from agent.utils import github_token
+
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+
+    class Response:
+        def __init__(self, token: str) -> None:
+            self.token = token
+
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, str]:
+            return {"token": self.token, "expires_at": future}
+
+    class Client(_CountingClient):
+        posts = 0
+
+        async def post(self, url: str, **kwargs: Any) -> Response:
+            type(self).posts += 1
+            return Response(f"app-token-{type(self).posts}")
+
+    _configure(monkeypatch, Client)
+    first, expires_at = await github_app.get_github_app_installation_token_with_expiry()
+    github_token.cache_github_token_for_thread(
+        "thread-1", first or "", expires_at=expires_at, source="app"
+    )
+
+    refreshed = await webapp._refresh_thread_github_token_after_401("thread-1", "")
+
+    assert first == "app-token-1"
+    assert refreshed == "app-token-2"
+    assert Client.posts == 2
+    await github_token.invalidate_cached_github_token("thread-1")
+
+
+@pytest.mark.asyncio
 async def test_cache_is_scoped_per_repository_set(monkeypatch: pytest.MonkeyPatch) -> None:
     future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
 

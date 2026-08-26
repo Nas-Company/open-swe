@@ -11,6 +11,7 @@ from agent.utils import auth, github_token
 def _clear_token_source_cache() -> None:
     github_token._GITHUB_TOKEN_CACHE.clear()
     github_token._GITHUB_TOKEN_SOURCES.clear()
+    github_token._GITHUB_TOKEN_PRINCIPALS.clear()
 
 
 def test_leave_failure_comment_posts_generic_token_free_slack_notice(
