@@ -18,6 +18,7 @@ from langgraph_sdk import get_client
 logger = logging.getLogger(__name__)
 
 MAX_QUEUED_MESSAGES = 100
+QUEUE_RECEIPT_TTL_MINUTES = 10080
 
 
 def langgraph_url() -> str:
@@ -59,6 +60,9 @@ async def queue_message_for_thread(
         key = "pending_messages"
         new_message = {"content": message_content}
         if dedupe_id:
+            receipt = await client.store.get_item(("queue_receipts", thread_id), dedupe_id)
+            if receipt is not None:
+                return True
             new_message["dedupe_id"] = dedupe_id
 
         existing_messages: list[dict[str, Any]] = []
@@ -95,7 +99,11 @@ async def queued_message_exists(thread_id: str, dedupe_id: str) -> bool:
     if not dedupe_id:
         return False
     try:
-        item = await langgraph_client().store.get_item(("queue", thread_id), "pending_messages")
+        client = langgraph_client()
+        receipt = await client.store.get_item(("queue_receipts", thread_id), dedupe_id)
+        if receipt is not None:
+            return True
+        item = await client.store.get_item(("queue", thread_id), "pending_messages")
     except Exception:  # noqa: BLE001
         return False
     value = item.get("value") if isinstance(item, dict) else None

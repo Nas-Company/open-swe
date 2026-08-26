@@ -22,6 +22,7 @@ class _FakeStore:
     def __init__(self, items: dict[tuple[tuple[str, ...], str], dict[str, Any]]) -> None:
         self.items = items
         self.deleted: list[tuple[tuple[str, ...], str]] = []
+        self.puts: list[tuple[tuple[str, ...], str, dict[str, Any], float | None]] = []
 
     async def aget(self, namespace: tuple[str, ...], key: str) -> _QueuedItem | None:
         value = self.items.get((namespace, key))
@@ -29,6 +30,17 @@ class _FakeStore:
 
     async def adelete(self, namespace: tuple[str, ...], key: str) -> None:
         self.deleted.append((namespace, key))
+
+    async def aput(
+        self,
+        namespace: tuple[str, ...],
+        key: str,
+        value: dict[str, Any],
+        *,
+        ttl: float | None = None,
+    ) -> None:
+        self.items[(namespace, key)] = value
+        self.puts.append((namespace, key, value, ttl))
 
 
 @pytest.mark.asyncio
@@ -57,6 +69,34 @@ async def test_check_message_queue_injects_dashboard_handoff_instruction() -> No
     assert message["role"] == "user"
     assert DASHBOARD_HANDOFF_MARKER in message["content"][0]["text"]
     assert message["content"][1] == {"type": "text", "text": "continue in web"}
+    assert store.deleted == [(("queue", "thread-1"), "pending_messages")]
+
+
+@pytest.mark.asyncio
+async def test_check_message_queue_persists_dedupe_receipt_before_deleting_queue() -> None:
+    store = _FakeStore(
+        {
+            (("queue", "thread-1"), "pending_messages"): {
+                "messages": [{"content": {"text": "continue"}, "dedupe_id": "evt-1"}]
+            }
+        }
+    )
+
+    with (
+        patch(
+            "agent.middleware.check_message_queue.get_config",
+            return_value={"configurable": {"thread_id": "thread-1"}},
+        ),
+        patch("agent.middleware.check_message_queue.get_store", return_value=store),
+    ):
+        result = await check_message_queue_before_model.abefore_model({}, MagicMock())
+
+    assert result is not None
+    assert store.puts[0][0:3] == (
+        ("queue_receipts", "thread-1"),
+        "evt-1",
+        {"consumed": True},
+    )
     assert store.deleted == [(("queue", "thread-1"), "pending_messages")]
 
 
