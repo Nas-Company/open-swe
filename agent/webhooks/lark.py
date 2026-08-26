@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
+from uuid import NAMESPACE_URL, uuid5
 
 from langchain_core.messages.content import create_image_block, create_text_block
 from langgraph_sdk import get_client
@@ -68,13 +69,25 @@ def select_lark_context(
     messages: tuple[LarkMessage, ...] | list[LarkMessage],
     current_message_id: str,
 ) -> tuple[LarkMessage, ...]:
-    selected: list[LarkMessage] = []
-    for message in messages:
-        if message.message_type in {"text", "post", "image"}:
-            selected.append(message)
-        if message.message_id == current_message_id:
-            break
-    return tuple(selected)
+    supported = [
+        message
+        for message in messages
+        if message.message_type in {"text", "post", "image"}
+        and message.sender_type not in {"app", "bot"}
+    ]
+    current_index = next(
+        (
+            index
+            for index, message in enumerate(supported)
+            if message.message_id == current_message_id
+        ),
+        len(supported) - 1,
+    )
+    start_index = 0
+    for index, message in enumerate(supported[:current_index]):
+        if message.mentions or "@openswe" in message.text.casefold():
+            start_index = index
+    return tuple(supported[start_index : current_index + 1])
 
 
 def extract_lark_repo_refs(
@@ -288,15 +301,11 @@ async def process_lark_card_action(payload: dict[str, object]) -> dict[str, obje
     tenant_key = _string(operator.get("tenant_key"))
     actor_open_id = _string(operator.get("open_id"))
     thread_id = _string(value.get("thread_id"))
-    fingerprint = _string(value.get("fingerprint"))
     action_type = _string(value.get("type"))
-    decision = _string(value.get("action"))
-    if not all((tenant_key, actor_open_id, thread_id, fingerprint, action_type, decision)):
-        return _card_error("Approval context is incomplete.")
-    if action_type not in {"workflow_push_approval", "plan_approval"}:
-        return _card_error("Unknown approval type.")
-    if decision not in {"approve", "reject"}:
-        return _card_error("Unknown approval decision.")
+    if not all((tenant_key, actor_open_id, thread_id, action_type)):
+        return _card_error("Action context is incomplete.")
+    if action_type not in {"workflow_push_approval", "plan_approval", "open_swe_option"}:
+        return _card_error("Unknown Lark card action type.")
 
     client = get_client(url=LANGGRAPH_URL)
     thread = await client.threads.get(thread_id)
@@ -310,7 +319,7 @@ async def process_lark_card_action(payload: dict[str, object]) -> dict[str, obje
     expected_tenant = _string(lark_context.get("tenant_key")) or LARK_TENANT_KEY
     owner_open_id = _string(lark_context.get("triggering_user_open_id"))
     if not expected_tenant or tenant_key != expected_tenant:
-        return _card_error("This approval belongs to a different Lark tenant.")
+        return _card_error("This action belongs to a different Lark tenant.")
     actor_login = await login_for_lark_id(tenant_key, actor_open_id)
     owner_login = _string(metadata.get("github_login"))
     if (
@@ -319,12 +328,32 @@ async def process_lark_card_action(payload: dict[str, object]) -> dict[str, obje
         or not owner_open_id
         or actor_open_id != owner_open_id
     ):
-        return _card_error("Only the person who requested this run can decide this approval.")
+        return _card_error("Only the person who requested this run can use this action.")
+
+    if action_type == "open_swe_option":
+        action_id = _string(value.get("action_id"))
+        response = _string(value.get("response"))
+        if not action_id or not response:
+            return _card_error("Option action context is incomplete.")
+        lock = _lark_approval_locks.setdefault((thread_id, action_id), asyncio.Lock())
+        async with lock:
+            if not await _claim_lark_action_once(client, thread_id, action_id):
+                return _card_error("That option was already selected.")
+            if not await _dispatch_lark_followup(client, metadata, thread_id, response):
+                return _card_error("The option was selected, but Open SWE could not resume.")
+        return _card_success("Selection received. Open SWE will continue in this thread.")
+
+    fingerprint = _string(value.get("fingerprint"))
+    decision = _string(value.get("action"))
+    if not fingerprint or decision not in {"approve", "reject"}:
+        return _card_error("Approval context is incomplete.")
 
     lock = _lark_approval_locks.setdefault((thread_id, fingerprint), asyncio.Lock())
     async with lock:
         if action_type == "workflow_push_approval":
             return await _process_workflow_card_decision(
+                client,
+                metadata,
                 thread_id,
                 fingerprint,
                 decision,
@@ -340,6 +369,8 @@ async def process_lark_card_action(payload: dict[str, object]) -> dict[str, obje
 
 
 async def _process_workflow_card_decision(
+    client: object,
+    metadata: dict[str, object],
     thread_id: str,
     fingerprint: str,
     decision: str,
@@ -353,6 +384,8 @@ async def _process_workflow_card_decision(
         return _card_error("That workflow approval was already decided.")
     if _approval_expired(record):
         return _card_error("That workflow approval has expired. Trigger the push again.")
+    if not await _claim_lark_action_once(client, thread_id, fingerprint):
+        return _card_error("That workflow approval was already decided.")
 
     approved = decision == "approve"
     updated = await decide_workflow_push_approval(
@@ -363,20 +396,19 @@ async def _process_workflow_card_decision(
     )
     if updated is None:
         return _card_error("That workflow approval no longer exists.")
-    if not approved:
-        return _card_success("Workflow push rejected. No workflow files will be pushed.")
-
-    queued = await queue_message_for_thread(
-        thread_id,
-        {
-            "source": "lark",
-            "text": "Retry the blocked git push now. The exact workflow fingerprint was approved; "
-            "do not alter workflow files before pushing.",
-        },
+    instruction = (
+        "Retry the blocked git push now. The exact workflow fingerprint was approved; "
+        "do not alter workflow files before pushing."
+        if approved
+        else "The workflow push was rejected. Do not push the workflow-file changes."
     )
-    if not queued:
-        return _card_error("The approval was saved, but the retry could not be queued.")
-    return _card_success("Workflow push approved. Open SWE will retry the exact blocked push.")
+    if not await _dispatch_lark_followup(client, metadata, thread_id, instruction):
+        return _card_error("The decision was saved, but Open SWE could not resume.")
+    return _card_success(
+        "Workflow push approved. Open SWE will retry the exact blocked push."
+        if approved
+        else "Workflow push rejected. No workflow files will be pushed."
+    )
 
 
 async def _process_plan_card_decision(
@@ -399,6 +431,8 @@ async def _process_plan_card_decision(
         return _card_error("That plan approval was already decided.")
     if _approval_expired(record):
         return _card_error("That plan approval has expired. Ask Open SWE for a fresh plan card.")
+    if not await _claim_lark_action_once(client, thread_id, fingerprint):
+        return _card_error("That plan approval was already decided.")
     record = dict(record)
     record.update(
         status="approved" if decision == "approve" else "rejected",
@@ -416,17 +450,59 @@ async def _process_plan_card_decision(
         if decision == "approve"
         else "The plan was rejected. Stay in plan mode and ask what should be revised."
     )
-    queued = await queue_message_for_thread(
-        thread_id,
-        {"source": "lark", "text": instruction},
-    )
-    if not queued:
-        return _card_error("The plan decision was saved, but the follow-up could not be queued.")
+    if not await _dispatch_lark_followup(client, metadata, thread_id, instruction):
+        return _card_error("The plan decision was saved, but Open SWE could not resume.")
     return _card_success(
         "Plan approved; implementation will continue."
         if decision == "approve"
         else "Plan rejected."
     )
+
+
+async def _claim_lark_action_once(client: object, thread_id: str, action_id: str) -> bool:
+    claim_id = str(uuid5(NAMESPACE_URL, f"open-swe:lark-action:{thread_id}:{action_id}"))
+    try:
+        await client.threads.create(
+            thread_id=claim_id,
+            if_exists="raise",
+            metadata={"kind": "lark_internal_claim", "source_thread_id": thread_id},
+            ttl=10080,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        status_code = getattr(exc, "status_code", None)
+        response = getattr(exc, "response", None)
+        if status_code == 409 or getattr(response, "status_code", None) == 409:
+            return False
+        raise
+
+
+async def _dispatch_lark_followup(
+    client: object,
+    metadata: dict[str, object],
+    thread_id: str,
+    text: str,
+) -> bool:
+    source_context = metadata.get("source_context")
+    lark_thread = source_context.get("lark_thread") if isinstance(source_context, dict) else None
+    if not isinstance(lark_thread, dict):
+        return False
+    configurable = {
+        "repo": metadata.get("repo"),
+        "lark_thread": lark_thread,
+        "user_email": metadata.get("user_email"),
+        "source": "lark",
+        "github_login": metadata.get("github_login"),
+    }
+    run = await dispatch_agent_run(
+        thread_id,
+        text,
+        configurable,
+        source="lark",
+        metadata=_AGENT_VERSION_METADATA,
+        client=client,
+    )
+    return isinstance(run, dict) and isinstance(run.get("run_id"), str)
 
 
 def _approval_expired(record: dict[str, object]) -> bool:

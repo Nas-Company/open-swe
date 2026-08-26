@@ -85,6 +85,31 @@ def test_parse_lark_image_event_extracts_image_key() -> None:
     assert event.message.image_keys == ("img-v3-test",)
 
 
+def test_parse_lark_rich_post_extracts_text_links_and_images() -> None:
+    event = parse_lark_event(
+        _message_event(
+            message_type="post",
+            content={
+                "title": "Review request",
+                "content": [
+                    [
+                        {
+                            "tag": "a",
+                            "text": "PR 44",
+                            "href": "https://github.com/Nas-Company/nas-e2e/pull/44",
+                        },
+                        {"tag": "img", "image_key": "img-post"},
+                    ]
+                ],
+            },
+        )
+    )
+
+    assert "Review request" in event.message.text
+    assert "https://github.com/Nas-Company/nas-e2e/pull/44" in event.message.text
+    assert event.message.image_keys == ("img-post",)
+
+
 def test_parse_lark_event_uses_message_as_root_when_root_is_missing() -> None:
     payload = json.loads(_message_event())
     payload["event"]["message"].pop("root_id")
@@ -299,6 +324,54 @@ async def test_fetch_lark_thread_filters_other_roots(monkeypatch: pytest.MonkeyP
         ("om-root", "root"),
         ("om-child", "child"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_lark_thread_follows_page_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport, requests = _transport(
+        [
+            _response(
+                200,
+                {
+                    "code": 0,
+                    "tenant_access_token": "tenant-token",
+                    "expire": 7200,
+                },
+            ),
+            _response(
+                200,
+                {
+                    "code": 0,
+                    "data": {"items": [], "has_more": True, "page_token": "next-page"},
+                },
+            ),
+            _response(
+                200,
+                {
+                    "code": 0,
+                    "data": {
+                        "items": [
+                            {
+                                "message_id": "om-root",
+                                "root_id": "",
+                                "chat_id": "oc-chat",
+                                "chat_type": "group",
+                                "msg_type": "text",
+                                "body": {"content": '{"text":"root"}'},
+                            }
+                        ],
+                        "has_more": False,
+                    },
+                },
+            ),
+        ]
+    )
+    _configure_api(monkeypatch, transport)
+
+    messages = await fetch_lark_thread("oc-chat", "om-root")
+
+    assert [message.message_id for message in messages] == ["om-root"]
+    assert requests[-1].url.params["page_token"] == "next-page"
 
 
 @pytest.mark.asyncio

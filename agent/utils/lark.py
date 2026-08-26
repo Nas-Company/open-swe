@@ -53,6 +53,7 @@ class LarkMessage:
     image_keys: tuple[str, ...]
     sender_id: str = ""
     sender_name: str = ""
+    sender_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -128,9 +129,7 @@ def parse_lark_event(body: bytes) -> LarkEvent:
         for mention in message_payload.get("mentions", ())
         if (open_id := str(mention.get("id", {}).get("open_id", "")))
     )
-    image_keys = (
-        (str(content["image_key"]),) if message_type == "image" and content.get("image_key") else ()
-    )
+    image_keys = _extract_image_keys(content)
 
     return LarkEvent(
         event_id=str(header["event_id"]),
@@ -149,10 +148,11 @@ def parse_lark_event(body: bytes) -> LarkEvent:
             chat_id=str(message_payload["chat_id"]),
             chat_type=str(message_payload.get("chat_type", "")),
             message_type=message_type,
-            text=str(content.get("text", "")),
+            text=_extract_content_text(content),
             mentions=mentions,
             image_keys=image_keys,
             sender_id=str(sender_ids.get("open_id", "")),
+            sender_type=str(sender_payload.get("sender_type", "")),
         ),
     )
 
@@ -290,17 +290,28 @@ async def get_lark_bot_open_id() -> str:
 
 
 async def fetch_lark_thread(chat_id: str, root_message_id: str) -> tuple[LarkMessage, ...]:
-    payload = await _api_request(
-        "GET",
-        "/open-apis/im/v1/messages",
-        params={
-            "container_id_type": "chat",
-            "container_id": chat_id,
-            "sort_type": "ByCreateTimeAsc",
-            "page_size": "50",
-        },
-    )
-    items = payload.get("data", {}).get("items", ())
+    params = {
+        "container_id_type": "chat",
+        "container_id": chat_id,
+        "sort_type": "ByCreateTimeAsc",
+        "page_size": "50",
+    }
+    items: list[dict[str, Any]] = []
+    seen_page_tokens: set[str] = set()
+    while True:
+        payload = await _api_request("GET", "/open-apis/im/v1/messages", params=params)
+        data = payload.get("data")
+        data = data if isinstance(data, dict) else {}
+        page_items = data.get("items")
+        if isinstance(page_items, list):
+            items.extend(item for item in page_items if isinstance(item, dict))
+        page_token = data.get("page_token")
+        if data.get("has_more") is not True or not isinstance(page_token, str) or not page_token:
+            break
+        if page_token in seen_page_tokens:
+            raise LarkApiError("Lark message pagination returned a repeated page token")
+        seen_page_tokens.add(page_token)
+        params = {**params, "page_token": page_token}
     messages = tuple(_normalize_api_message(item) for item in items if isinstance(item, dict))
     return tuple(
         message
@@ -408,8 +419,8 @@ def _normalize_api_message(payload: dict[str, Any]) -> LarkMessage:
     message_type = str(payload.get("msg_type") or payload.get("message_type", ""))
     body = payload.get("body", {})
     content = _parse_content(body.get("content") if isinstance(body, dict) else None)
-    image_key = str(content.get("image_key", ""))
     sender = payload.get("sender", {})
+    mentions = payload.get("mentions")
     return LarkMessage(
         message_id=message_id,
         root_message_id=str(payload.get("root_id") or message_id),
@@ -417,11 +428,17 @@ def _normalize_api_message(payload: dict[str, Any]) -> LarkMessage:
         chat_id=str(payload.get("chat_id", "")),
         chat_type=str(payload.get("chat_type", "")),
         message_type=message_type,
-        text=str(content.get("text", "")),
-        mentions=(),
-        image_keys=(image_key,) if message_type == "image" and image_key else (),
+        text=_extract_content_text(content),
+        mentions=tuple(
+            open_id
+            for mention in mentions or ()
+            if isinstance(mention, dict)
+            and (open_id := str(mention.get("id", {}).get("open_id", "")))
+        ),
+        image_keys=_extract_image_keys(content),
         sender_id=str(sender.get("id", "")) if isinstance(sender, dict) else "",
         sender_name=str(sender.get("name", "")) if isinstance(sender, dict) else "",
+        sender_type=str(sender.get("sender_type", "")) if isinstance(sender, dict) else "",
     )
 
 
@@ -432,3 +449,41 @@ def _parse_content(raw_content: Any) -> dict[str, Any]:
         parsed = json.loads(raw_content)
         return parsed if isinstance(parsed, dict) else {}
     return raw_content if isinstance(raw_content, dict) else {}
+
+
+def _extract_content_text(content: object) -> str:
+    values: list[str] = []
+
+    def walk(value: object, key: str = "") -> None:
+        if isinstance(value, str):
+            if key in {"text", "title", "href", "url"} and value.strip():
+                values.append(value.strip())
+            return
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                walk(child, str(child_key))
+            return
+        if isinstance(value, list):
+            for child in value:
+                walk(child, key)
+
+    walk(content)
+    return "\n".join(dict.fromkeys(values))
+
+
+def _extract_image_keys(content: object) -> tuple[str, ...]:
+    values: list[str] = []
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            image_key = value.get("image_key")
+            if isinstance(image_key, str) and image_key:
+                values.append(image_key)
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(content)
+    return tuple(dict.fromkeys(values))

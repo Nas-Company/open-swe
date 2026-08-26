@@ -32,12 +32,42 @@ class _FakeStore:
         self.items[(tuple(namespace), key)] = dict(value)
 
 
+class _ConflictError(Exception):
+    status_code = 409
+
+
+class _FakeThreads:
+    def __init__(self) -> None:
+        self.ids: set[str] = set()
+
+    async def create(self, *, thread_id: str, **_kwargs: Any) -> dict[str, str]:
+        if thread_id in self.ids:
+            raise _ConflictError
+        self.ids.add(thread_id)
+        return {"thread_id": thread_id}
+
+
 @pytest.fixture
 def fake_store(monkeypatch: pytest.MonkeyPatch) -> _FakeStore:
     store = _FakeStore()
-    monkeypatch.setattr(lark_events, "_client", lambda: SimpleNamespace(store=store))
+    threads = _FakeThreads()
+    monkeypatch.setattr(
+        lark_events,
+        "_client",
+        lambda: SimpleNamespace(store=store, threads=threads),
+    )
     lark_events._event_locks.clear()
     return store
+
+
+@pytest.mark.asyncio
+async def test_attempt_claim_is_atomic_across_processes(fake_store: _FakeStore) -> None:
+    first, second = await asyncio.gather(
+        lark_events._acquire_attempt_claim("evt-1", 1),
+        lark_events._acquire_attempt_claim("evt-1", 1),
+    )
+
+    assert sorted((first, second)) == [False, True]
 
 
 @pytest.mark.asyncio

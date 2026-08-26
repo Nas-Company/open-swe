@@ -101,6 +101,11 @@ async def test_lark_event_to_agent_to_threaded_reply_and_replay(
     monkeypatch.setattr(webapp, "get_lark_bot_open_id", AsyncMock(return_value="ou-bot"))
     store = _Store()
     monkeypatch.setattr(lark_events, "_client", lambda: SimpleNamespace(store=store))
+    monkeypatch.setattr(
+        lark_events,
+        "_acquire_attempt_claim",
+        AsyncMock(return_value=True),
+    )
     lark_events._event_locks.clear()
 
     trigger = lark.parse_lark_event(_event_body()).message

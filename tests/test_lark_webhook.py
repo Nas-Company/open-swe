@@ -49,6 +49,11 @@ def configured_lark(monkeypatch: pytest.MonkeyPatch) -> _FakeStore:
     monkeypatch.setattr(webapp, "get_lark_bot_open_id", AsyncMock(return_value="ou-bot"))
     store = _FakeStore()
     monkeypatch.setattr(lark_events, "_client", lambda: SimpleNamespace(store=store))
+    monkeypatch.setattr(
+        lark_events,
+        "_acquire_attempt_claim",
+        AsyncMock(return_value=True),
+    )
     lark_events._event_locks.clear()
     return store
 
@@ -184,6 +189,31 @@ async def test_invalid_signature_is_rejected(configured_lark: _FakeStore) -> Non
     response = await _post(body, _headers(body, signature="invalid"))
 
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_processing_failure_posts_safe_lark_reply(
+    configured_lark: _FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = lark.parse_lark_event(_event(event_id="evt-failed"))
+    monkeypatch.setattr(
+        "agent.webhooks.lark.process_lark_mention",
+        AsyncMock(side_effect=RuntimeError("secret detail")),
+    )
+    reply = AsyncMock()
+    monkeypatch.setattr(webapp, "reply_to_lark_message", reply, raising=False)
+    failed = AsyncMock()
+    monkeypatch.setattr(webapp, "mark_lark_event_failed", failed)
+
+    await webapp._process_lark_event(event)
+
+    reply.assert_awaited_once()
+    assert reply.await_args.args[0] == "om-root"
+    text = reply.await_args.args[1]["text"]
+    assert "evt-failed" in text
+    assert "secret detail" not in text
+    failed.assert_awaited_once_with("evt-failed", "processing_failed")
 
 
 @pytest.mark.asyncio

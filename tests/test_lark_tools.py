@@ -86,6 +86,30 @@ async def test_plan_approval_stores_random_pending_fingerprint(
 
 
 @pytest.mark.asyncio
+async def test_option_card_carries_thread_and_one_time_action_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post = AsyncMock(return_value=MagicMock(ok=True, message_id="om-card"))
+    monkeypatch.setattr(
+        reply_module,
+        "get_config",
+        lambda: {
+            "configurable": {
+                "thread_id": "thread-1",
+                "lark_thread": {"root_message_id": "om-root"},
+            }
+        },
+    )
+    monkeypatch.setattr(reply_module, "reply_to_lark_message", post)
+
+    await lark_thread_reply("Choose", options=["One", "Two"])
+
+    actions = post.await_args.args[1]["body"]["elements"][1]["actions"]
+    assert {action["value"]["thread_id"] for action in actions} == {"thread-1"}
+    assert len({action["value"]["action_id"] for action in actions}) == 1
+
+
+@pytest.mark.asyncio
 async def test_read_tool_returns_normalized_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     message = LarkMessage(
         message_id="om-1",

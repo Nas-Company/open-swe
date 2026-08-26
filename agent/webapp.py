@@ -98,6 +98,7 @@ from .utils.lark import (
     LarkEvent,
     get_lark_bot_open_id,
     lark_configured,
+    reply_to_lark_message,
     verify_lark_card_action,
     verify_lark_message_event,
 )
@@ -1023,6 +1024,16 @@ async def _process_lark_event(event: LarkEvent) -> None:
         await process_lark_mention(event)
     except Exception:  # noqa: BLE001
         logger.exception("Failed to process Lark event %s", event.event_id)
+        try:
+            await reply_to_lark_message(
+                event.message.root_message_id,
+                {
+                    "text": "I couldn't process that request because of an internal error. "
+                    f"Reference: `{event.event_id}`. Please try again."
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to post Lark processing failure for %s", event.event_id)
         await mark_lark_event_failed(event.event_id, "processing_failed")
 
 

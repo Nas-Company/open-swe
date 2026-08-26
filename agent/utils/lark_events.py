@@ -5,6 +5,7 @@ import os
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
+from uuid import NAMESPACE_URL, uuid5
 
 from langgraph_sdk import get_client
 
@@ -51,6 +52,8 @@ async def claim_lark_event(event_id: str, thread_id: str) -> ClaimResult:
         record = await _get_record(event_id)
         if record is None:
             claimed = _new_claim(event_id, thread_id, attempts=1)
+            if not await _acquire_attempt_claim(event_id, 1):
+                return ClaimResult("in_progress", claimed)
             await _put_record(claimed)
             return ClaimResult("claimed", claimed)
 
@@ -61,9 +64,31 @@ async def claim_lark_event(event_id: str, thread_id: str) -> ClaimResult:
         if record.status == "dispatching" and not _claim_is_stale(record):
             return ClaimResult("in_progress", record)
 
-        claimed = _new_claim(event_id, thread_id, attempts=record.attempts + 1)
+        next_attempt = record.attempts + 1
+        claimed = _new_claim(event_id, thread_id, attempts=next_attempt)
+        if not await _acquire_attempt_claim(event_id, next_attempt):
+            latest = await _get_record(event_id)
+            return ClaimResult("in_progress", latest or claimed)
         await _put_record(claimed)
         return ClaimResult("claimed", claimed)
+
+
+async def _acquire_attempt_claim(event_id: str, attempt: int) -> bool:
+    claim_id = str(uuid5(NAMESPACE_URL, f"open-swe:lark-event:{event_id}:attempt:{attempt}"))
+    try:
+        await _client().threads.create(
+            thread_id=claim_id,
+            if_exists="raise",
+            metadata={"kind": "lark_internal_claim", "event_id": event_id, "attempt": attempt},
+            ttl=10080,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        status_code = getattr(exc, "status_code", None)
+        response = getattr(exc, "response", None)
+        if status_code == 409 or getattr(response, "status_code", None) == 409:
+            return False
+        raise
 
 
 async def mark_lark_event_dispatched(event_id: str, run_id: str) -> LarkEventRecord:

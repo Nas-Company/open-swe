@@ -22,6 +22,7 @@ from .reviewer_findings import REVIEWER_THREAD_KIND
 from .reviewer_publish import fail_review_started_comment
 from .utils.github_app import get_github_app_installation_token
 from .utils.github_comments import post_github_comment
+from .utils.lark import reply_to_lark_message
 from .utils.linear import comment_on_linear_issue
 from .utils.slack import post_slack_thread_reply
 from .utils.thread_ops import langgraph_client
@@ -113,6 +114,15 @@ async def _post_failure_reply(thread_id: str, metadata: dict[str, Any], status: 
             issue_id = linear_issue.get("id")
             if issue_id:
                 return await comment_on_linear_issue(issue_id, text)
+        return False
+
+    if source == "lark":
+        lark_thread = ctx.get("lark_thread")
+        if isinstance(lark_thread, dict):
+            root_message_id = lark_thread.get("root_message_id")
+            if isinstance(root_message_id, str) and root_message_id:
+                result = await reply_to_lark_message(root_message_id, {"text": text})
+                return result.ok
         return False
 
     if source in ("github", "github_issue"):

@@ -33,6 +33,10 @@ class _FakeThreads:
         self.updates.append(metadata)
 
 
+class _ConflictError(Exception):
+    status_code = 409
+
+
 def _metadata(*, status: str = "pending", requested_at: str | None = None) -> dict[str, Any]:
     return {
         "github_login": "alice",
@@ -97,10 +101,11 @@ def _configure(
 ) -> tuple[_FakeThreads, AsyncMock]:
     threads = _FakeThreads(metadata)
     client = SimpleNamespace(threads=threads)
-    queue = AsyncMock(return_value=True)
+    dispatch = AsyncMock(return_value={"run_id": "run-followup"})
     monkeypatch.setattr(lark_webhook, "get_client", lambda **_kwargs: client)
     monkeypatch.setattr(lark_webhook, "login_for_lark_id", AsyncMock(return_value="alice"))
-    monkeypatch.setattr(lark_webhook, "queue_message_for_thread", queue)
+    monkeypatch.setattr(lark_webhook, "dispatch_agent_run", dispatch)
+    monkeypatch.setattr(lark_webhook, "_claim_lark_action_once", AsyncMock(return_value=True))
     monkeypatch.setattr(
         lark_webhook,
         "get_workflow_push_approvals",
@@ -113,7 +118,7 @@ def _configure(
         raising=False,
     )
     lark_webhook._lark_approval_locks.clear()
-    return threads, queue
+    return threads, dispatch
 
 
 def _decide(threads: _FakeThreads):
@@ -185,64 +190,64 @@ async def test_card_route_returns_terminal_card_response(
 
 @pytest.mark.asyncio
 async def test_wrong_user_cannot_approve(monkeypatch: pytest.MonkeyPatch) -> None:
-    _, queue = _configure(monkeypatch, _metadata())
+    _, dispatch = _configure(monkeypatch, _metadata())
     monkeypatch.setattr(lark_webhook, "login_for_lark_id", AsyncMock(return_value="bob"))
 
     result = await lark_webhook.process_lark_card_action(_action(actor="ou-other"))
 
     assert result["toast"]["type"] == "error"
-    queue.assert_not_awaited()
+    dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_owner_approval_resumes_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    _, queue = _configure(monkeypatch, _metadata())
+    _, dispatch = _configure(monkeypatch, _metadata())
 
     first = await lark_webhook.process_lark_card_action(_action())
     replay = await lark_webhook.process_lark_card_action(_action())
 
     assert first["toast"]["type"] == "success"
     assert replay["toast"]["type"] == "error"
-    queue.assert_awaited_once()
-    assert "Retry the blocked git push" in queue.await_args.args[1]["text"]
+    dispatch.assert_awaited_once()
+    assert "Retry the blocked git push" in dispatch.await_args.args[1]
 
 
 @pytest.mark.asyncio
 async def test_expired_approval_never_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
     old = datetime.now(UTC) - timedelta(seconds=lark_webhook.LARK_APPROVAL_TTL_SECONDS + 1)
-    _, queue = _configure(monkeypatch, _metadata(requested_at=old.isoformat()))
+    _, dispatch = _configure(monkeypatch, _metadata(requested_at=old.isoformat()))
 
     result = await lark_webhook.process_lark_card_action(_action())
 
     assert result["toast"]["type"] == "error"
     assert "expired" in result["toast"]["content"].lower()
-    queue.assert_not_awaited()
+    dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_fingerprint_mismatch_never_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
-    _, queue = _configure(monkeypatch, _metadata())
+    _, dispatch = _configure(monkeypatch, _metadata())
     action = _action()
     action["event"]["action"]["value"]["fingerprint"] = "different"
 
     result = await lark_webhook.process_lark_card_action(action)
 
     assert result["toast"]["type"] == "error"
-    queue.assert_not_awaited()
+    dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_plan_approval_requires_stored_pending_fingerprint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, queue = _configure(monkeypatch, _metadata())
+    _, dispatch = _configure(monkeypatch, _metadata())
     action = _action()
     action["event"]["action"]["value"]["type"] = "plan_approval"
 
     result = await lark_webhook.process_lark_card_action(action)
 
     assert result["toast"]["type"] == "error"
-    queue.assert_not_awaited()
+    dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -255,7 +260,7 @@ async def test_plan_owner_approval_resumes_once(monkeypatch: pytest.MonkeyPatch)
             "requested_at": datetime.now(UTC).isoformat(),
         }
     }
-    _, queue = _configure(monkeypatch, metadata)
+    _, dispatch = _configure(monkeypatch, metadata)
     action = _action()
     action["event"]["action"]["value"]["type"] = "plan_approval"
 
@@ -264,5 +269,50 @@ async def test_plan_owner_approval_resumes_once(monkeypatch: pytest.MonkeyPatch)
 
     assert first["toast"]["type"] == "success"
     assert replay["toast"]["type"] == "error"
-    queue.assert_awaited_once()
+    dispatch.assert_awaited_once()
     assert metadata["lark_plan_approvals"][FINGERPRINT]["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_workflow_rejection_dispatches_terminal_followup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, dispatch = _configure(monkeypatch, _metadata())
+
+    result = await lark_webhook.process_lark_card_action(_action(action="reject"))
+
+    assert result["toast"]["type"] == "success"
+    dispatch.assert_awaited_once()
+    assert "rejected" in dispatch.await_args.args[1].lower()
+
+
+@pytest.mark.asyncio
+async def test_option_action_dispatches_selected_response_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, dispatch = _configure(monkeypatch, _metadata())
+    action = _action()
+    action["event"]["action"]["value"] = {
+        "type": "open_swe_option",
+        "thread_id": THREAD_ID,
+        "action_id": "option-1",
+        "response": "Use repository one",
+    }
+
+    result = await lark_webhook.process_lark_card_action(action)
+
+    assert result["toast"]["type"] == "success"
+    dispatch.assert_awaited_once()
+    assert dispatch.await_args.args[1] == "Use repository one"
+
+
+@pytest.mark.asyncio
+async def test_action_claim_is_atomic_across_processes() -> None:
+    create = AsyncMock(side_effect=[{"thread_id": "claim"}, _ConflictError()])
+    client = SimpleNamespace(threads=SimpleNamespace(create=create))
+
+    first = await lark_webhook._claim_lark_action_once(client, THREAD_ID, FINGERPRINT)
+    replay = await lark_webhook._claim_lark_action_once(client, THREAD_ID, FINGERPRINT)
+
+    assert first is True
+    assert replay is False

@@ -15,6 +15,8 @@ def _message(
     *,
     message_id: str = "om-message",
     image_keys: tuple[str, ...] = (),
+    mentions: tuple[str, ...] = ("ou-bot",),
+    sender_type: str = "user",
 ) -> LarkMessage:
     return LarkMessage(
         message_id=message_id,
@@ -24,8 +26,9 @@ def _message(
         chat_type="group",
         message_type="text",
         text=text,
-        mentions=("ou-bot",),
+        mentions=mentions,
         image_keys=image_keys,
+        sender_type=sender_type,
     )
 
 
@@ -75,6 +78,26 @@ def test_multiple_repositories_require_disambiguation() -> None:
         {"owner": "Nas-Company", "name": "one"},
         {"owner": "Nas-Company", "name": "two"},
     )
+
+
+def test_context_starts_at_previous_mention_and_ignores_bot_messages() -> None:
+    messages = [
+        _message(
+            "old https://github.com/Nas-Company/old",
+            message_id="om-root",
+            mentions=(),
+        ),
+        _message("working", message_id="om-bot", mentions=(), sender_type="app"),
+        _message(
+            "@openswe use https://github.com/Nas-Company/nas-e2e",
+            message_id="om-previous",
+        ),
+        _message("current follow-up", message_id="om-current", mentions=()),
+    ]
+
+    context = lark_webhook.select_lark_context(messages, "om-current")
+
+    assert [message.message_id for message in context] == ["om-previous", "om-current"]
 
 
 def _configure_happy_path(monkeypatch: pytest.MonkeyPatch, event: LarkEvent) -> dict[str, object]:

@@ -54,7 +54,15 @@ async def lark_thread_reply(
         )
         msg_type = "interactive"
     elif clean_options:
-        content = _option_card(message.strip(), clean_options)
+        thread_id = configurable.get("thread_id") if isinstance(configurable, dict) else None
+        if not isinstance(thread_id, str) or not thread_id:
+            return {"success": False, "error": "Missing thread_id for Lark options"}
+        content = _option_card(
+            message.strip(),
+            clean_options,
+            thread_id=thread_id,
+            action_id=secrets.token_urlsafe(32),
+        )
         msg_type = "interactive"
     else:
         content = {"text": message.strip()}
@@ -162,7 +170,13 @@ def _approval_button(
     }
 
 
-def _option_card(message: str, options: list[str]) -> dict[str, object]:
+def _option_card(
+    message: str,
+    options: list[str],
+    *,
+    thread_id: str,
+    action_id: str,
+) -> dict[str, object]:
     return {
         "schema": "2.0",
         "config": {"update_multi": True},
@@ -176,7 +190,12 @@ def _option_card(message: str, options: list[str]) -> dict[str, object]:
                             "tag": "button",
                             "text": {"tag": "plain_text", "content": option[:75]},
                             "type": "default",
-                            "value": {"type": "open_swe_option", "response": option},
+                            "value": {
+                                "type": "open_swe_option",
+                                "response": option,
+                                "thread_id": thread_id,
+                                "action_id": action_id,
+                            },
                         }
                         for option in options
                     ],

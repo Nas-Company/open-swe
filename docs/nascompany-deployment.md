@@ -119,6 +119,12 @@ Optional integrations:
   SLACK_SIGNING_SECRET
   SLACK_CLIENT_ID
   SLACK_CLIENT_SECRET
+  LARK_APP_ID
+  LARK_APP_SECRET
+  LARK_VERIFICATION_TOKEN
+  LARK_ENCRYPT_KEY
+  LARK_TENANT_KEY
+  LARK_GITHUB_ORG
   EXA_API_KEY
 ```
 
@@ -134,7 +140,24 @@ DASHBOARD_ALLOWED_ORIGINS=https://nascompany-open-swe-indol.vercel.app
 ALLOWED_GITHUB_ORGS=Nas-Company
 DEFAULT_REPO_OWNER=Nas-Company
 DEFAULT_REPO_NAME=open-swe
+LARK_GITHUB_ORG=Nas-Company
 ```
+
+Lark production endpoints:
+
+```text
+Event subscription URL:
+  https://nascompany-open-swe-5786464fff6d52fdb4f32c80d541067d.aws.us.langgraph.app/webhooks/lark
+Card callback URL:
+  https://nascompany-open-swe-5786464fff6d52fdb4f32c80d541067d.aws.us.langgraph.app/webhooks/lark/card
+OAuth redirect URL:
+  https://nascompany-open-swe-indol.vercel.app/dashboard/api/lark/callback
+```
+
+Keep the Lark App Secret, verification token, and encrypt key only in the Lark
+developer console and the LangGraph deployment environment. The event subscription
+must include `im.message.receive_v1`; interactive cards must deliver
+`card.action.trigger` to the card callback URL.
 
 Model routing intent:
 
