@@ -19,6 +19,8 @@ from agent.integrations.modal import (
     ModalSandboxConfig,
     ModalSandboxOwnershipError,
     _build_browser_image,
+    _read_binary_file,
+    _write_binary_file,
     create_modal_sandbox,
 )
 from agent.utils.sandbox import create_sandbox
@@ -76,6 +78,19 @@ def test_browser_image_contains_pinned_report_runtime() -> None:
             "PLAYWRIGHT_BROWSERS_PATH": "/ms-playwright",
         }
     )
+
+
+def test_binary_transfer_uses_current_modal_filesystem_api() -> None:
+    sandbox = MagicMock()
+    sandbox.exec.return_value = _process(stdout="4")
+    sandbox.filesystem.read_bytes.return_value = b"data"
+
+    assert _read_binary_file(sandbox, "/tmp/input.bundle", timeout=30, max_bytes=10) == b"data"
+    _write_binary_file(sandbox, "/tmp/output.bundle", b"safe")
+
+    sandbox.open.assert_not_called()
+    sandbox.filesystem.read_bytes.assert_called_once_with("/tmp/input.bundle")
+    sandbox.filesystem.write_bytes.assert_called_once_with(b"safe", "/tmp/output.bundle")
 
 
 def test_modal_config_reads_lifecycle_and_resource_settings() -> None:
@@ -438,11 +453,7 @@ def test_clone_transfers_only_bundle_bytes_to_main_sandbox() -> None:
     bundle = b"safe git bundle"
     sandbox = MagicMock(object_id="sb-existing")
     broker = MagicMock(object_id="sb-broker")
-    target_file = MagicMock()
-    broker_file = MagicMock()
-    broker_file.read.return_value = bundle
-    sandbox.open.return_value = target_file
-    broker.open.return_value = broker_file
+    broker.filesystem.read_bytes.return_value = bundle
 
     def broker_exec(*args: str, **_kwargs: object) -> MagicMock:
         if args[:3] == ("/usr/bin/git", "ls-remote", "--symref"):
@@ -461,9 +472,9 @@ def test_clone_transfers_only_bundle_bytes_to_main_sandbox() -> None:
         )
 
     assert result.exit_code == 0
-    target_file.write.assert_called_once_with(bundle)
+    sandbox.filesystem.write_bytes.assert_called_once_with(bundle, sandbox.rm.call_args.args[0])
     assert all(token not in repr(call) for call in sandbox.exec.call_args_list)
-    assert token not in repr(sandbox.open.call_args_list)
+    assert token not in repr(sandbox.filesystem.write_bytes.call_args_list)
     assert any(
         call.args[:3] == ("/usr/bin/git", "clone", "--no-checkout")
         and call.args[-1] == "/workspace/report"
@@ -479,11 +490,7 @@ def test_fetch_resolves_fixed_origin_in_main_and_authenticates_only_broker() -> 
     bundle = b"fetched objects"
     sandbox = MagicMock(object_id="sb-existing")
     broker = MagicMock(object_id="sb-broker")
-    target_file = MagicMock()
-    broker_file = MagicMock()
-    broker_file.read.return_value = bundle
-    sandbox.open.return_value = target_file
-    broker.open.return_value = broker_file
+    broker.filesystem.read_bytes.return_value = bundle
 
     target_responses = iter(
         [
@@ -505,7 +512,7 @@ def test_fetch_resolves_fixed_origin_in_main_and_authenticates_only_broker() -> 
         result = backend.execute("git -C /workspace/report fetch origin main --quiet")
 
     assert result.exit_code == 0
-    assert target_file.write.call_args.args == (bundle,)
+    assert sandbox.filesystem.write_bytes.call_args.args[0] == bundle
     assert all(token not in repr(call) for call in sandbox.exec.call_args_list)
     authenticated_broker_calls = [
         call
@@ -531,11 +538,7 @@ def test_fetch_accepts_explicit_canonical_github_url_for_verified_remote_sha() -
     bundle = b"fetched commit"
     sandbox = MagicMock(object_id="sb-existing")
     broker = MagicMock(object_id="sb-broker")
-    target_file = MagicMock()
-    broker_file = MagicMock()
-    broker_file.read.return_value = bundle
-    sandbox.open.return_value = target_file
-    broker.open.return_value = broker_file
+    broker.filesystem.read_bytes.return_value = bundle
     sandbox.exec.return_value = _process(stdout="updated")
 
     def broker_exec(*args: str, **_kwargs: object) -> MagicMock:
@@ -573,11 +576,7 @@ def test_fixed_push_bundles_head_without_token_then_pushes_from_broker() -> None
     bundle = b"local commits"
     sandbox = MagicMock(object_id="sb-existing")
     broker = MagicMock(object_id="sb-broker")
-    target_file = MagicMock()
-    target_file.read.return_value = bundle
-    broker_file = MagicMock()
-    sandbox.open.return_value = target_file
-    broker.open.return_value = broker_file
+    sandbox.filesystem.read_bytes.return_value = bundle
     target_responses = iter(
         [
             _process(stdout=f"{sha}\n"),
@@ -603,8 +602,8 @@ def test_fixed_push_bundles_head_without_token_then_pushes_from_broker() -> None
 
     assert result.exit_code == 0
     assert all(token not in repr(call) for call in sandbox.exec.call_args_list)
-    assert token not in repr(sandbox.open.call_args_list)
-    broker_file.write.assert_called_once_with(bundle)
+    assert token not in repr(sandbox.filesystem.read_bytes.call_args_list)
+    broker.filesystem.write_bytes.assert_called_once_with(bundle, "/broker/input.bundle")
     push_call = next(call for call in broker.exec.call_args_list if "push" in call.args)
     assert push_call.args[-2:] == (
         "https://github.com/Nas-Company/nas-reporting.git",
