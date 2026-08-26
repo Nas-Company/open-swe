@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 import modal
-from deepagents.backends.protocol import ExecuteResponse
+from deepagents.backends.protocol import ExecuteResponse, FileDownloadResponse, FileUploadResponse
 from langchain_modal import ModalSandbox
 
 PLAYWRIGHT_IMAGE = "mcr.microsoft.com/playwright:v1.61.0-noble"
@@ -651,6 +651,32 @@ class AuthenticatedModalSandbox(ModalSandbox):
         self._github_token = github_token
         self._github_token_lock = threading.Lock()
         self._github_token_overrides: dict[str, deque[str]] = {}
+
+    def _read_file(self, path: str) -> FileDownloadResponse:
+        if not path.startswith("/"):
+            return FileDownloadResponse(path=path, content=None, error="invalid_path")
+        try:
+            content = self._sandbox.filesystem.read_bytes(path)
+        except modal.exception.SandboxFilesystemNotFoundError:
+            return FileDownloadResponse(path=path, content=None, error="file_not_found")
+        except modal.exception.SandboxFilesystemIsADirectoryError:
+            return FileDownloadResponse(path=path, content=None, error="is_directory")
+        except modal.exception.SandboxFilesystemPermissionError:
+            return FileDownloadResponse(path=path, content=None, error="permission_denied")
+        return FileDownloadResponse(path=path, content=bytes(content), error=None)
+
+    def _write_file(self, path: str, content: bytes) -> FileUploadResponse:
+        if not path.startswith("/"):
+            return FileUploadResponse(path=path, error="invalid_path")
+        try:
+            self._sandbox.filesystem.write_bytes(content, path)
+        except modal.exception.SandboxFilesystemNotFoundError:
+            return FileUploadResponse(path=path, error="file_not_found")
+        except modal.exception.SandboxFilesystemIsADirectoryError:
+            return FileUploadResponse(path=path, error="is_directory")
+        except modal.exception.SandboxFilesystemPermissionError:
+            return FileUploadResponse(path=path, error="permission_denied")
+        return FileUploadResponse(path=path, error=None)
 
     def set_github_token(self, github_token: str | None) -> None:
         with self._github_token_lock:

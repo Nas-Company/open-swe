@@ -347,6 +347,24 @@ def render_status_comment(
     return "\n\n".join(parts)
 
 
+def render_failed_status_comment(
+    *,
+    pr_number: int,
+    status: str,
+    thread_id: str | None = None,
+) -> str:
+    reason = "timed out" if status == "timeout" else "hit an unexpected error"
+    parts = [
+        "## ⚠️ Open SWE Review: failed\n\n"
+        f"The review {reason} before it could publish findings. Mention `@openswe` to retry."
+    ]
+    ui_url = dashboard_thread_url(thread_id) if thread_id else None
+    if ui_url:
+        parts.append(f"[Open in Web]({ui_url})")
+    parts.append(status_comment_marker(pr_number))
+    return "\n\n".join(parts)
+
+
 async def post_status_comment(
     *,
     owner: str,
@@ -432,6 +450,35 @@ async def clear_review_started_comment(
         return
     await delete_status_comment(owner=owner, repo=repo, comment_id=comment_id, token=token)
     await set_reviewer_thread_metadata(thread_id, extra={"status_comment_id": None})
+
+
+async def fail_review_started_comment(
+    *,
+    thread_id: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    token: str,
+    status: str,
+) -> bool:
+    metadata = await get_thread_metadata(thread_id)
+    comment_id = metadata.get("status_comment_id")
+    if isinstance(comment_id, int):
+        await delete_status_comment(owner=owner, repo=repo, comment_id=comment_id, token=token)
+    body = render_failed_status_comment(
+        pr_number=pr_number,
+        status=status,
+        thread_id=thread_id,
+    )
+    new_id = await post_status_comment(
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        body=body,
+        token=token,
+    )
+    await set_reviewer_thread_metadata(thread_id, extra={"status_comment_id": new_id})
+    return new_id is not None
 
 
 async def settle_review_check_run(

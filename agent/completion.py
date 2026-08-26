@@ -18,6 +18,8 @@ import logging
 import os
 from typing import Any
 
+from .reviewer_findings import REVIEWER_THREAD_KIND
+from .reviewer_publish import fail_review_started_comment
 from .utils.github_app import get_github_app_installation_token
 from .utils.github_comments import post_github_comment
 from .utils.linear import comment_on_linear_issue
@@ -76,6 +78,25 @@ async def _post_failure_reply(thread_id: str, metadata: dict[str, Any], status: 
     ctx = metadata.get("source_context")
     ctx = ctx if isinstance(ctx, dict) else {}
     text = _failure_text(status)
+
+    if metadata.get("kind") == REVIEWER_THREAD_KIND:
+        pr = metadata.get("pr")
+        pr = pr if isinstance(pr, dict) else {}
+        owner = pr.get("owner")
+        repo = pr.get("name")
+        pr_number = pr.get("number")
+        if isinstance(owner, str) and isinstance(repo, str) and isinstance(pr_number, int):
+            token = await get_github_app_installation_token()
+            if token:
+                return await fail_review_started_comment(
+                    thread_id=thread_id,
+                    owner=owner,
+                    repo=repo,
+                    pr_number=pr_number,
+                    token=token,
+                    status=status,
+                )
+        return False
 
     if source == "slack":
         slack_thread = ctx.get("slack_thread")

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from agent import completion
+from agent import completion, reviewer_publish
 
 
 class _FakeThreads:
@@ -90,6 +90,52 @@ async def test_linear_source_comments_on_issue(monkeypatch: pytest.MonkeyPatch) 
     assert result["status"] == "ok"
     comment.assert_awaited_once()
     assert comment.await_args.args[0] == "iss_1"
+
+
+@pytest.mark.asyncio
+async def test_reviewer_error_replaces_live_github_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = {
+        "kind": "reviewer",
+        "pr": {"owner": "Nas-Company", "name": "nas-fe", "number": 9702},
+    }
+    client = _FakeClient(metadata)
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    monkeypatch.setattr(
+        completion,
+        "get_github_app_installation_token",
+        AsyncMock(return_value="ghs_app"),
+    )
+    delete_status = AsyncMock(return_value=True)
+    post_status = AsyncMock(return_value=4243)
+    set_metadata = AsyncMock()
+    monkeypatch.setattr(
+        reviewer_publish,
+        "get_thread_metadata",
+        AsyncMock(return_value={"status_comment_id": 4242}),
+    )
+    monkeypatch.setattr(reviewer_publish, "delete_status_comment", delete_status)
+    monkeypatch.setattr(reviewer_publish, "post_status_comment", post_status)
+    monkeypatch.setattr(reviewer_publish, "set_reviewer_thread_metadata", set_metadata)
+
+    result = await completion.handle_run_completion(
+        {"thread_id": "reviewer-thread", "status": "error"}
+    )
+
+    assert result == {"status": "ok", "reason": "failure reply posted"}
+    delete_status.assert_awaited_once_with(
+        owner="Nas-Company",
+        repo="nas-fe",
+        comment_id=4242,
+        token="ghs_app",
+    )
+    post_status.assert_awaited_once()
+    assert post_status.await_args.kwargs["pr_number"] == 9702
+    assert "Open SWE Review: failed" in post_status.await_args.kwargs["body"]
+    assert "@openswe" in post_status.await_args.kwargs["body"]
+    set_metadata.assert_awaited_once_with("reviewer-thread", extra={"status_comment_id": 4243})
+    assert client.threads.updates == [{"failure_reply_posted": True}]
 
 
 @pytest.mark.asyncio
