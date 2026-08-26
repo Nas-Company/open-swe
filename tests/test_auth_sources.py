@@ -62,6 +62,16 @@ def _slack_config(github_login: str | None = "mason-gh") -> dict:
     return {"configurable": configurable}
 
 
+def _github_config(github_login: str = "jimbo23") -> dict:
+    return {
+        "configurable": {
+            "source": "github",
+            "github_login": github_login,
+            "thread_id": "shared-pr-thread",
+        }
+    }
+
+
 def _stub_dashboard_store(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -167,6 +177,100 @@ def test_resolve_github_token_slack_no_token_falls_back_to_bot_in_bot_only_mode(
 
     token, expires_at = asyncio.run(auth.resolve_github_token(_slack_config(), "t1"))
     assert (token, expires_at) == ("bot-tok", None)
+
+
+def test_resolve_github_token_github_uses_dashboard_oauth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_dashboard_store(monkeypatch, token="jimbo-token")
+    monkeypatch.setattr(auth, "is_bot_token_only_mode", lambda: False)
+
+    token, _ = asyncio.run(auth.resolve_github_token(_github_config(), "shared-pr-thread"))
+
+    assert token == "jimbo-token"
+    assert github_token.get_github_token_principal_for_thread("shared-pr-thread") == "jimbo23"
+
+
+def test_resolve_github_token_github_unmapped_falls_back_to_app_across_processes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_dashboard_store(monkeypatch, token=None)
+    monkeypatch.setattr(auth, "is_bot_token_only_mode", lambda: False)
+
+    async def fake_bot(thread_id: str):
+        return "app-token", "2099-01-01T00:00:00Z"
+
+    monkeypatch.setattr(auth, "_resolve_bot_installation_token", fake_bot)
+
+    token, _ = asyncio.run(
+        auth.resolve_github_token(_github_config("external-user"), "shared-pr-thread")
+    )
+
+    assert token == "app-token"
+
+
+def test_resolve_github_token_github_never_reuses_another_users_cached_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    github_token.cache_github_token_for_thread(
+        "shared-pr-thread",
+        "alice-token",
+        source="user",
+        principal="alice",
+    )
+    _stub_dashboard_store(
+        monkeypatch,
+        token=None,
+        cached=("alice-token", "2099-01-01T00:00:00Z"),
+    )
+    monkeypatch.setattr(auth, "is_bot_token_only_mode", lambda: False)
+
+    async def fake_bot(thread_id: str):
+        return "app-token", "2099-01-01T00:00:00Z"
+
+    monkeypatch.setattr(auth, "_resolve_bot_installation_token", fake_bot)
+
+    token, _ = asyncio.run(
+        auth.resolve_github_token(_github_config("external-user"), "shared-pr-thread")
+    )
+
+    assert token == "app-token"
+
+
+@pytest.mark.parametrize(
+    ("source", "principal", "login"),
+    [
+        ("app", None, "external-user"),
+        ("user", "jimbo23", "jimbo23"),
+    ],
+    ids=["app", "same-user"],
+)
+def test_resolve_github_token_github_reuses_safe_cached_token(
+    monkeypatch: pytest.MonkeyPatch,
+    source: github_token.GitHubTokenSource,
+    principal: str | None,
+    login: str,
+) -> None:
+    github_token.cache_github_token_for_thread(
+        "shared-pr-thread",
+        "cached-token",
+        source=source,
+        principal=principal,
+    )
+    monkeypatch.setattr(auth, "is_bot_token_only_mode", lambda: False)
+
+    async def fail_user(*args):
+        raise AssertionError("safe cache hit must not query dashboard OAuth")
+
+    async def fail_app(*args):
+        raise AssertionError("safe cache hit must not mint an App token")
+
+    monkeypatch.setattr(auth, "_resolve_dashboard_user_token", fail_user)
+    monkeypatch.setattr(auth, "_resolve_bot_installation_token", fail_app)
+
+    token, _ = asyncio.run(auth.resolve_github_token(_github_config(login), "shared-pr-thread"))
+
+    assert token == "cached-token"
 
 
 @pytest.mark.parametrize("source", ["github", "linear"])
