@@ -325,3 +325,35 @@ async def test_download_lark_image_returns_binary_resource(
 
     assert image == b"image-bytes"
     assert requests[-1].url.params["type"] == "image"
+
+
+@pytest.mark.asyncio
+async def test_get_lark_bot_open_id_uses_app_bot_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport, requests = _transport(
+        [
+            _response(
+                200,
+                {
+                    "code": 0,
+                    "msg": "ok",
+                    "tenant_access_token": "tenant-token",
+                    "expire": 7200,
+                },
+            ),
+            _response(
+                200,
+                {
+                    "code": 0,
+                    "msg": "success",
+                    "bot": {"open_id": "ou-bot", "app_name": "openswe"},
+                },
+            ),
+        ]
+    )
+    _configure_api(monkeypatch, transport)
+    monkeypatch.setattr(lark, "_bot_open_id", None, raising=False)
+
+    open_id = await lark.get_lark_bot_open_id()
+
+    assert open_id == "ou-bot"
+    assert requests[-1].url.path == "/open-apis/bot/v3/info"

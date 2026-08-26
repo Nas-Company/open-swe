@@ -92,6 +92,15 @@ from .utils.github_token import (
     invalidate_cached_github_token,
 )
 from .utils.http import DEFAULT_HTTP_TIMEOUT
+from .utils.lark import (
+    LARK_TENANT_KEY,
+    LarkApiError,
+    LarkEvent,
+    get_lark_bot_open_id,
+    lark_configured,
+    verify_lark_message_event,
+)
+from .utils.lark_events import claim_lark_event, mark_lark_event_failed
 from .utils.linear import post_linear_trace_comment  # noqa: F401
 from .utils.linear_team_repo_map import LINEAR_TEAM_TO_REPO
 from .utils.multimodal import (
@@ -381,6 +390,15 @@ def generate_thread_id_from_slack_thread(channel_id: str, thread_id: str) -> str
     composite = f"{channel_id}:{thread_id}"
     md5_hex = hashlib.md5(composite.encode("utf-8")).hexdigest()
     return str(uuid.UUID(hex=md5_hex))
+
+
+def generate_thread_id_from_lark(
+    tenant_key: str,
+    chat_id: str,
+    root_message_id: str,
+) -> str:
+    stable_key = f"lark:{tenant_key}:{chat_id}:{root_message_id}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, stable_key))
 
 
 def generate_reviewer_thread_id(owner: str, repo: str, pr_number: int) -> str:
@@ -995,6 +1013,76 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
 async def linear_webhook_verify() -> dict[str, str]:
     """Verify endpoint for Linear webhook setup."""
     return {"status": "ok", "message": "Linear webhook endpoint is active"}
+
+
+async def _process_lark_event(event: LarkEvent) -> None:
+    try:
+        from .webhooks.lark import process_lark_mention
+
+        await process_lark_mention(event)
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to process Lark event %s", event.event_id)
+        await mark_lark_event_failed(event.event_id, "processing_failed")
+
+
+@app.post("/webhooks/lark")
+async def lark_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    if not lark_configured():
+        raise HTTPException(status_code=503, detail="Lark integration is not configured")
+
+    body = await request.body()
+    try:
+        result = verify_lark_message_event(body, request.headers)
+    except LarkApiError as exc:
+        logger.warning("Rejected Lark webhook: %s", exc)
+        raise HTTPException(status_code=401, detail="Invalid Lark webhook") from exc
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid Lark event") from exc
+
+    if result.event is None:
+        if isinstance(result.response.get("challenge"), str):
+            return result.response
+        return {"status": "ignored", "reason": "Not a message event"}
+
+    event = result.event
+    message = event.message
+    if event.tenant_key != LARK_TENANT_KEY or event.sender.tenant_key != LARK_TENANT_KEY:
+        return {"status": "ignored", "reason": "Wrong Lark tenant"}
+    if event.sender.sender_type != "user":
+        return {"status": "ignored", "reason": "Event from a bot or application"}
+    if not all((event.event_id, message.message_id, message.chat_id, message.root_message_id)):
+        return {"status": "ignored", "reason": "Missing message identifiers"}
+
+    if message.chat_type == "group":
+        try:
+            bot_open_id = await get_lark_bot_open_id()
+        except LarkApiError as exc:
+            logger.error("Could not resolve Lark bot identity: %s", exc)
+            raise HTTPException(status_code=503, detail="Lark bot identity unavailable") from exc
+        if bot_open_id not in message.mentions:
+            return {"status": "ignored", "reason": "Bot was not structurally mentioned"}
+    elif message.chat_type != "p2p":
+        return {"status": "ignored", "reason": "Unsupported Lark chat type"}
+
+    thread_id = generate_thread_id_from_lark(
+        event.tenant_key,
+        message.chat_id,
+        message.root_message_id,
+    )
+    claim = await claim_lark_event(event.event_id, thread_id)
+    if claim.status != "claimed":
+        return {"status": "duplicate", "state": claim.status}
+
+    background_tasks.add_task(_process_lark_event, event)
+    return {"status": "accepted", "thread_id": thread_id}
+
+
+@app.get("/webhooks/lark")
+async def lark_webhook_verify() -> dict[str, str]:
+    return {"status": "ok", "message": "Lark webhook endpoint is active"}
 
 
 @app.post("/webhooks/slack")

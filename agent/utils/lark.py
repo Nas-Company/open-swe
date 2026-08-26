@@ -4,6 +4,8 @@ import asyncio
 import json
 import os
 import time
+import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -79,6 +81,12 @@ class LarkApiResult:
 
 
 @dataclass(frozen=True)
+class LarkWebhookResult:
+    event: LarkEvent | None
+    response: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class _TenantToken:
     value: str
     expires_at: float
@@ -86,6 +94,8 @@ class _TenantToken:
 
 _tenant_token: _TenantToken | None = None
 _tenant_token_lock = asyncio.Lock()
+_bot_open_id: str | None = None
+_bot_open_id_lock = asyncio.Lock()
 
 
 def lark_configured() -> bool:
@@ -144,6 +154,42 @@ def parse_lark_event(body: bytes) -> LarkEvent:
     )
 
 
+def verify_lark_message_event(
+    body: bytes,
+    headers: Mapping[str, str],
+) -> LarkWebhookResult:
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"lark_oapi\..*")
+        import lark_oapi
+        from lark_oapi.core.model import RawRequest
+
+    captured: list[Any] = []
+    dispatcher = (
+        lark_oapi.EventDispatcherHandler.builder(LARK_ENCRYPT_KEY, LARK_VERIFICATION_TOKEN)
+        .register_p2_im_message_receive_v1(captured.append)
+        .build()
+    )
+    raw_request = RawRequest()
+    raw_request.uri = "/webhooks/lark"
+    raw_request.body = body
+    raw_request.headers = {
+        "X-Lark-Request-Timestamp": headers.get("X-Lark-Request-Timestamp", ""),
+        "X-Lark-Request-Nonce": headers.get("X-Lark-Request-Nonce", ""),
+        "X-Lark-Signature": headers.get("X-Lark-Signature", ""),
+    }
+    sdk_response = dispatcher.do(raw_request)
+    response_payload = _parse_content(sdk_response.content)
+    if sdk_response.status_code != 200:
+        raise LarkApiError("Lark webhook verification failed", code=sdk_response.status_code)
+    if not captured:
+        return LarkWebhookResult(event=None, response=response_payload)
+    normalized_body = lark_oapi.JSON.marshal(captured[0]).encode()
+    return LarkWebhookResult(
+        event=parse_lark_event(normalized_body),
+        response=response_payload,
+    )
+
+
 async def get_lark_tenant_token(*, force_refresh: bool = False) -> str:
     global _tenant_token
 
@@ -178,6 +224,26 @@ async def get_lark_user(open_id: str) -> dict[str, Any]:
     )
     user = payload.get("data", {}).get("user", {})
     return user if isinstance(user, dict) else {}
+
+
+async def get_lark_bot_open_id() -> str:
+    global _bot_open_id
+
+    if _bot_open_id:
+        return _bot_open_id
+    async with _bot_open_id_lock:
+        if _bot_open_id:
+            return _bot_open_id
+        payload = await _api_request("GET", "/open-apis/bot/v3/info")
+        bot = payload.get("bot")
+        if not isinstance(bot, dict):
+            data = payload.get("data")
+            bot = data.get("bot") if isinstance(data, dict) else None
+        open_id = bot.get("open_id") if isinstance(bot, dict) else None
+        if not isinstance(open_id, str) or not open_id:
+            raise LarkApiError("Lark bot info missing open ID")
+        _bot_open_id = open_id
+        return open_id
 
 
 async def fetch_lark_thread(chat_id: str, root_message_id: str) -> tuple[LarkMessage, ...]:
@@ -314,6 +380,8 @@ def _normalize_api_message(payload: dict[str, Any]) -> LarkMessage:
 
 
 def _parse_content(raw_content: Any) -> dict[str, Any]:
+    if isinstance(raw_content, bytes):
+        raw_content = raw_content.decode()
     if isinstance(raw_content, str):
         parsed = json.loads(raw_content)
         return parsed if isinstance(parsed, dict) else {}
