@@ -1,4 +1,4 @@
-"""Store-backed bidirectional GitHub ⇄ work-email ⇄ Slack-id user mapping.
+"""Store-backed GitHub ⇄ work-email ⇄ chat-identity user mapping.
 
 Replaces the static ``GITHUB_USER_EMAIL_MAP`` dict. The canonical record is
 keyed by GitHub login in the ``["user_mappings"]`` LangGraph Store namespace::
@@ -7,6 +7,8 @@ keyed by GitHub login in the ``["user_mappings"]`` LangGraph Store namespace::
         "github_login": "octocat",
         "work_email": "octo@example.com",
         "slack_user_id": "U123" | None,
+        "lark_tenant_key": "tenant-key" | None,
+        "lark_open_id": "ou_123" | None,
         "source": "slack_oauth",
         "status": "active" | "pending",
         "created_at": "...", "updated_at": "...",
@@ -35,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 USER_MAPPINGS_NAMESPACE: list[str] = ["user_mappings"]
 
-MappingSource = Literal["slack_oauth", "github_oauth"]
+MappingSource = Literal["slack_oauth", "github_oauth", "lark_oauth"]
 MappingStatus = Literal["active", "pending"]
 
 
@@ -59,14 +61,19 @@ def _norm_slack_id(slack_user_id: str | None) -> str:
     return slack_user_id.strip() if isinstance(slack_user_id, str) else ""
 
 
+def _norm_lark_id(value: str | None) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
 # ---------------------------------------------------------------------------
 # In-process cache
 # ---------------------------------------------------------------------------
 
 _cache_lock = threading.RLock()
 _by_login: dict[str, dict[str, Any]] = {}
-_by_email: dict[str, dict[str, Any]] = {}
+_by_email: dict[str, dict[str, dict[str, Any]]] = {}
 _by_slack_id: dict[str, dict[str, Any]] = {}
+_by_lark_id: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
 _cache_loaded = False
 
 
@@ -76,12 +83,18 @@ def _index_record(record: dict[str, Any]) -> None:
         return
     with _cache_lock:
         _by_login[login.lower()] = record
+        if record.get("status", "active") != "active":
+            return
         email = _norm_email(record.get("work_email"))
         if email:
-            _by_email[email] = record
+            _by_email.setdefault(email, {})[login.lower()] = record
         slack_id = _norm_slack_id(record.get("slack_user_id"))
         if slack_id:
             _by_slack_id[slack_id] = record
+        tenant_key = _norm_lark_id(record.get("lark_tenant_key"))
+        open_id = _norm_lark_id(record.get("lark_open_id"))
+        if tenant_key and open_id:
+            _by_lark_id.setdefault((tenant_key, open_id), {})[login.lower()] = record
 
 
 def _deindex_login(login: str) -> None:
@@ -90,11 +103,21 @@ def _deindex_login(login: str) -> None:
         if not existing:
             return
         email = _norm_email(existing.get("work_email"))
-        if email and _by_email.get(email) is existing:
-            _by_email.pop(email, None)
+        email_records = _by_email.get(email)
+        if email_records:
+            email_records.pop(login.lower(), None)
+            if not email_records:
+                _by_email.pop(email, None)
         slack_id = _norm_slack_id(existing.get("slack_user_id"))
         if slack_id and _by_slack_id.get(slack_id) is existing:
             _by_slack_id.pop(slack_id, None)
+        tenant_key = _norm_lark_id(existing.get("lark_tenant_key"))
+        open_id = _norm_lark_id(existing.get("lark_open_id"))
+        lark_records = _by_lark_id.get((tenant_key, open_id))
+        if lark_records:
+            lark_records.pop(login.lower(), None)
+            if not lark_records:
+                _by_lark_id.pop((tenant_key, open_id), None)
 
 
 def prime_cache(records: list[dict[str, Any]]) -> None:
@@ -104,6 +127,7 @@ def prime_cache(records: list[dict[str, Any]]) -> None:
         _by_login.clear()
         _by_email.clear()
         _by_slack_id.clear()
+        _by_lark_id.clear()
     for record in records:
         if isinstance(record, dict):
             _index_record(record)
@@ -118,6 +142,7 @@ def clear_cache() -> None:
         _by_login.clear()
         _by_email.clear()
         _by_slack_id.clear()
+        _by_lark_id.clear()
         _cache_loaded = False
 
 
@@ -141,7 +166,8 @@ def cached_login_for_email(email: str | None) -> str | None:
     if not norm:
         return None
     with _cache_lock:
-        record = _by_email.get(norm)
+        records = _by_email.get(norm, {})
+        record = next(iter(records.values())) if len(records) == 1 else None
     return _norm_login(record.get("github_login")) or None if record else None
 
 
@@ -151,6 +177,20 @@ def cached_login_for_slack_id(slack_user_id: str | None) -> str | None:
         return None
     with _cache_lock:
         record = _by_slack_id.get(norm)
+    return _norm_login(record.get("github_login")) or None if record else None
+
+
+def cached_login_for_lark_id(
+    tenant_key: str | None,
+    open_id: str | None,
+) -> str | None:
+    tenant = _norm_lark_id(tenant_key)
+    user = _norm_lark_id(open_id)
+    if not tenant or not user:
+        return None
+    with _cache_lock:
+        records = _by_lark_id.get((tenant, user), {})
+        record = next(iter(records.values())) if len(records) == 1 else None
     return _norm_login(record.get("github_login")) or None if record else None
 
 
@@ -177,13 +217,24 @@ def _record_from_item(item: Any) -> dict[str, Any] | None:
 
 
 async def _load_all_records() -> list[dict[str, Any]]:
-    result = await _client().store.search_items(USER_MAPPINGS_NAMESPACE, limit=1000)
-    items = result.get("items") if isinstance(result, dict) else getattr(result, "items", [])
     out: list[dict[str, Any]] = []
-    for item in items or []:
-        record = _record_from_item(item)
-        if record:
-            out.append(record)
+    offset = 0
+    page_size = 1000
+    while True:
+        result = await _client().store.search_items(
+            USER_MAPPINGS_NAMESPACE,
+            limit=page_size,
+            offset=offset,
+        )
+        items = result.get("items") if isinstance(result, dict) else getattr(result, "items", [])
+        page = list(items or [])
+        for item in page:
+            record = _record_from_item(item)
+            if record:
+                out.append(record)
+        if len(page) < page_size:
+            break
+        offset += len(page)
     return out
 
 
@@ -254,11 +305,26 @@ async def login_for_slack_id(slack_user_id: str | None) -> str | None:
     return cached_login_for_slack_id(slack_user_id)
 
 
+async def login_for_lark_id(
+    tenant_key: str | None,
+    open_id: str | None,
+) -> str | None:
+    cached = cached_login_for_lark_id(tenant_key, open_id)
+    if cached is not None:
+        return cached
+    await _ensure_cache_loaded()
+    return cached_login_for_lark_id(tenant_key, open_id)
+
+
 async def upsert_mapping(
     *,
     github_login: str,
     work_email: str,
     slack_user_id: str | None = None,
+    lark_tenant_key: str | None = None,
+    lark_open_id: str | None = None,
+    lark_union_id: str | None = None,
+    lark_display_name: str | None = None,
     source: MappingSource = "slack_oauth",
     status: MappingStatus = "active",
 ) -> dict[str, Any]:
@@ -275,6 +341,14 @@ async def upsert_mapping(
         "github_login": login,
         "work_email": email,
         "slack_user_id": _norm_slack_id(slack_user_id) or existing.get("slack_user_id") or None,
+        "lark_tenant_key": _norm_lark_id(lark_tenant_key)
+        or existing.get("lark_tenant_key")
+        or None,
+        "lark_open_id": _norm_lark_id(lark_open_id) or existing.get("lark_open_id") or None,
+        "lark_union_id": _norm_lark_id(lark_union_id) or existing.get("lark_union_id") or None,
+        "lark_display_name": _norm_lark_id(lark_display_name)
+        or existing.get("lark_display_name")
+        or None,
         "source": source,
         "status": status,
         "created_at": existing.get("created_at") or _now(),

@@ -113,6 +113,7 @@ export interface SessionUser {
   avatar_url: string | null
   is_admin: boolean
   slack_oauth_enabled?: boolean
+  lark_oauth_enabled?: boolean
 }
 
 export interface ModelOption {
@@ -226,6 +227,10 @@ export interface UserMapping {
   github_login: string
   work_email: string
   slack_user_id?: string | null
+  lark_tenant_key?: string | null
+  lark_open_id?: string | null
+  lark_union_id?: string | null
+  lark_display_name?: string | null
   source?: string
   status?: string
   created_at?: string
@@ -821,6 +826,10 @@ export function loginUrl(redirectTo?: string): string {
 
 export function slackConnectUrl(): string {
   return `${API_BASE}/dashboard/api/slack/login`
+}
+
+export function larkConnectUrl(): string {
+  return `${API_BASE}/dashboard/api/lark/login`
 }
 
 export function notionConnectUrl(): string {

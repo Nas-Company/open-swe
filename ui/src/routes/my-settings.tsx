@@ -17,7 +17,12 @@ import {
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
-import { api, notionConnectUrl, slackConnectUrl } from "@/lib/api"
+import {
+  api,
+  larkConnectUrl,
+  notionConnectUrl,
+  slackConnectUrl,
+} from "@/lib/api"
 import {
   buildProfileUpdate,
   useOptions,
@@ -54,23 +59,28 @@ function fromChoice(choice: DraftReviewChoice): boolean | null {
 function UserMappingSection({ session }: { session: SessionUser }) {
   const qc = useQueryClient()
   const mapping = useQuery({ queryKey: ["myMapping"], queryFn: api.myMapping })
-  const [connecting, setConnecting] = useState(false)
+  const [connecting, setConnecting] = useState<"slack" | "lark" | null>(null)
 
   const slackUserId = mapping.data?.slack_user_id ?? null
+  const larkOpenId = mapping.data?.lark_open_id ?? null
+  const larkDisplayName = mapping.data?.lark_display_name ?? null
   const workEmail = mapping.data?.work_email ?? null
-  const connected = !!slackUserId
+  const slackConnected = !!slackUserId
+  const larkConnected = !!larkOpenId
 
-  const connect = () => {
-    setConnecting(true)
+  const connect = (provider: "slack" | "lark") => {
+    setConnecting(provider)
     // Refresh the cached mapping when the user returns from the OAuth redirect.
     void qc.invalidateQueries({ queryKey: ["myMapping"] })
-    window.location.assign(slackConnectUrl())
+    window.location.assign(
+      provider === "slack" ? slackConnectUrl() : larkConnectUrl()
+    )
   }
 
   return (
     <SettingsSection
       title="User mapping"
-      description="Connect your Slack account so Open SWE can resolve your GitHub account when you tag it in Slack. We use the email Slack verifies, which also lets Linear mentions resolve to you."
+      description="Connect the workplace accounts you use to invoke Open SWE. Each verified account maps back to your signed-in GitHub identity, even when the email addresses differ."
     >
       <div className="divide-y divide-border">
         <SettingsRow
@@ -84,7 +94,7 @@ function UserMappingSection({ session }: { session: SessionUser }) {
         <SettingsRow
           label="Slack account"
           description={
-            connected
+            slackConnected
               ? `Linked to Slack member ${slackUserId}${workEmail ? ` · ${workEmail}` : ""}.`
               : "Not connected. Sign in with Slack to verify your identity — no manual IDs to copy."
           }
@@ -93,30 +103,70 @@ function UserMappingSection({ session }: { session: SessionUser }) {
               <span
                 className={cn(
                   "rounded-full px-2 py-0.5 text-[10px] font-medium",
-                  connected
+                  slackConnected
                     ? "bg-primary/10 text-primary"
                     : "bg-muted text-muted-foreground"
                 )}
               >
-                {connected ? "Connected" : "Not connected"}
+                {slackConnected ? "Connected" : "Not connected"}
               </span>
               {session.slack_oauth_enabled ? (
                 <Button
                   size="sm"
-                  variant={connected ? "outline" : "default"}
-                  onClick={connect}
-                  disabled={connecting || mapping.isLoading}
+                  variant={slackConnected ? "outline" : "default"}
+                  onClick={() => connect("slack")}
+                  disabled={connecting !== null || mapping.isLoading}
                 >
                   <IoLogoSlack className="size-4" />
-                  {connecting
+                  {connecting === "slack"
                     ? "Redirecting…"
-                    : connected
+                    : slackConnected
                       ? "Reconnect"
                       : "Connect Slack"}
                 </Button>
               ) : (
                 <span className="text-[10px] text-muted-foreground">
                   Sign in with Slack unavailable
+                </span>
+              )}
+            </div>
+          }
+        />
+        <SettingsRow
+          label="Lark account"
+          description={
+            larkConnected
+              ? `Linked to ${larkDisplayName || `Lark member ${larkOpenId}`}.`
+              : "Not connected. Sign in with Lark to link your verified Lark identity to this GitHub account."
+          }
+          control={
+            <div className="flex items-center gap-2">
+              <span
+                className={cn(
+                  "rounded-full px-2 py-0.5 text-[10px] font-medium",
+                  larkConnected
+                    ? "bg-primary/10 text-primary"
+                    : "bg-muted text-muted-foreground"
+                )}
+              >
+                {larkConnected ? "Connected" : "Not connected"}
+              </span>
+              {session.lark_oauth_enabled ? (
+                <Button
+                  size="sm"
+                  variant={larkConnected ? "outline" : "default"}
+                  onClick={() => connect("lark")}
+                  disabled={connecting !== null || mapping.isLoading}
+                >
+                  {connecting === "lark"
+                    ? "Redirecting…"
+                    : larkConnected
+                      ? "Reconnect"
+                      : "Connect Lark"}
+                </Button>
+              ) : (
+                <span className="text-[10px] text-muted-foreground">
+                  Sign in with Lark unavailable
                 </span>
               )}
             </div>

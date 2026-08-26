@@ -26,6 +26,7 @@ from ..dashboard.workflow_approval import (
     mark_workflow_push_notified,
     workflow_push_approved,
 )
+from ..tools.lark_thread_reply import build_lark_approval_card
 from ..tools.slack_thread_reply import build_workflow_approval_blocks
 from ..utils.github_app import (
     RUNTIME_PROXY_TOKEN_PERMISSIONS,
@@ -37,6 +38,7 @@ from ..utils.github_proxy import (
     proxy_token_repositories,
     refresh_proxy_token,
 )
+from ..utils.lark import reply_to_lark_message
 from ..utils.sandbox_state import SANDBOX_BACKENDS
 from ..utils.slack import post_slack_thread_reply_with_ts
 
@@ -664,6 +666,34 @@ async def _post_slack_approval_if_needed(
             await mark_workflow_push_notified(thread_id, change.fingerprint)
 
 
+async def _post_lark_approval_if_needed(
+    request: ToolCallRequest, change: WorkflowPushChange, record: Mapping[str, Any]
+) -> None:
+    if record.get("notified") is True:
+        return
+    configurable = _configurable(request)
+    lark_thread = configurable.get("lark_thread")
+    if not isinstance(lark_thread, Mapping):
+        return
+    root_message_id = lark_thread.get("root_message_id")
+    thread_id = _thread_id(request)
+    if not isinstance(root_message_id, str) or not root_message_id or not thread_id:
+        return
+    message = _approval_slack_message(change)
+    result = await reply_to_lark_message(
+        root_message_id,
+        build_lark_approval_card(
+            message,
+            "workflow_push_approval",
+            change.fingerprint,
+            thread_id=thread_id,
+        ),
+        msg_type="interactive",
+    )
+    if result.ok:
+        await mark_workflow_push_notified(thread_id, change.fingerprint)
+
+
 async def _approval_state(request: ToolCallRequest, change: WorkflowPushChange) -> str:
     thread_id = _thread_id(request)
     if not thread_id:
@@ -681,6 +711,7 @@ async def _approval_state(request: ToolCallRequest, change: WorkflowPushChange) 
             files=change.files,
         )
         await _post_slack_approval_if_needed(request, change, record)
+        await _post_lark_approval_if_needed(request, change, record)
         return str(record.get("status") or "pending")
     except Exception:
         logger.exception("Failed to read or write workflow push approval state")

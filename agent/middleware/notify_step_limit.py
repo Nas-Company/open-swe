@@ -10,6 +10,7 @@ from langchain.agents.middleware import AgentState, after_agent
 from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
+from ..utils.lark import reply_to_lark_message
 from ..utils.slack import post_slack_thread_reply
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,22 @@ async def notify_step_limit_reached(
 
     config = get_config()
     configurable = config.get("configurable", {})
+    message = (
+        "I've reached my maximum step limit and had to stop. "
+        "The task may be incomplete. You can retry with a more focused request, "
+        "or ask me to continue from where I left off."
+    )
+    lark_thread = configurable.get("lark_thread") if isinstance(configurable, dict) else None
+    if isinstance(lark_thread, dict):
+        root_message_id = lark_thread.get("root_message_id")
+        if isinstance(root_message_id, str) and root_message_id:
+            try:
+                await reply_to_lark_message(root_message_id, {"text": message})
+                logger.info("Sent step-limit notification to Lark root %s", root_message_id)
+            except Exception:
+                logger.exception("Failed to send step-limit notification to Lark")
+            return None
+
     slack_thread = configurable.get("slack_thread") if isinstance(configurable, dict) else None
     if not isinstance(slack_thread, dict):
         logger.info("No Slack thread config — cannot send step-limit notification")
@@ -72,12 +89,6 @@ async def notify_step_limit_reached(
     ):
         logger.info("No Slack thread config — cannot send step-limit notification")
         return None
-
-    message = (
-        "I've reached my maximum step limit and had to stop. "
-        "The task may be incomplete. You can retry with a more focused request, "
-        "or ask me to continue from where I left off."
-    )
 
     try:
         await post_slack_thread_reply(channel_id, thread_ts, message)

@@ -93,6 +93,27 @@ async def test_linear_source_comments_on_issue(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
+async def test_lark_source_replies_under_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _FakeClient(
+        {
+            "source": "lark",
+            "source_context": {"lark_thread": {"root_message_id": "om-root"}},
+        }
+    )
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    reply = AsyncMock(return_value=type("Result", (), {"ok": True})())
+    monkeypatch.setattr(completion, "reply_to_lark_message", reply, raising=False)
+
+    result = await completion.handle_run_completion({"thread_id": "t1", "status": "error"})
+
+    assert result["status"] == "ok"
+    reply.assert_awaited_once_with(
+        "om-root",
+        {"text": completion._failure_text("error")},
+    )
+
+
+@pytest.mark.asyncio
 async def test_reviewer_error_replaces_live_github_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

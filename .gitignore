@@ -68,4 +68,8 @@ __pycache__/
 *.egg-info/
 .eggs/
 
-# 
+# Local Superpowers brainstorming companion
+.superpowers/
+
+# Local implementation worktrees
+.worktrees/

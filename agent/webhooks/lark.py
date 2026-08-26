@@ -1,0 +1,703 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import math
+import os
+import re
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Literal
+from uuid import NAMESPACE_URL, uuid5
+
+from langchain_core.messages.content import create_image_block, create_text_block
+from langgraph_sdk import get_client
+
+from agent.dashboard.agent_overrides import resolve_agent_model_id
+from agent.dashboard.enabled_repos import is_review_repo_enabled
+from agent.dashboard.oauth import build_settings_url
+from agent.dashboard.options import model_supports_images
+from agent.dashboard.user_mappings import login_for_email, login_for_lark_id
+from agent.dashboard.workflow_approval import (
+    decide_workflow_push_approval,
+    get_workflow_push_approvals,
+)
+from agent.dispatch import dispatch_agent_run
+from agent.utils.github_app import get_github_app_installation_token
+from agent.utils.github_org_membership import is_user_active_org_member
+from agent.utils.lark import (
+    LARK_TENANT_KEY,
+    LarkEvent,
+    LarkMessage,
+    download_lark_image,
+    fetch_lark_thread,
+    get_lark_user,
+    reply_to_lark_message,
+)
+from agent.utils.lark_events import get_lark_event_record, mark_lark_event_dispatched
+from agent.webapp import (
+    _AGENT_VERSION_METADATA,
+    LANGGRAPH_URL,
+    _is_repo_allowed,
+    generate_thread_id_from_lark,
+    upsert_agent_thread_owner_metadata,
+)
+
+LARK_GITHUB_ORG = os.environ.get("LARK_GITHUB_ORG", "Nas-Company").strip() or "Nas-Company"
+LARK_IMAGE_MAX_COUNT = int(os.environ.get("LARK_IMAGE_MAX_COUNT", "4"))
+LARK_IMAGE_MAX_BYTES = int(os.environ.get("LARK_IMAGE_MAX_BYTES", str(10 * 1024 * 1024)))
+LARK_IMAGE_TOTAL_MAX_BYTES = int(
+    os.environ.get("LARK_IMAGE_TOTAL_MAX_BYTES", str(20 * 1024 * 1024))
+)
+LARK_APPROVAL_TTL_SECONDS = int(os.environ.get("LARK_APPROVAL_TTL_SECONDS", "900"))
+
+_GITHUB_REPO_URL = re.compile(
+    r"https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)",
+    re.IGNORECASE,
+)
+_lark_approval_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+@dataclass(frozen=True)
+class LarkRepoSelection:
+    status: Literal["missing", "selected", "ambiguous"]
+    repo: dict[str, str] | None
+    repositories: tuple[dict[str, str], ...]
+
+
+def select_lark_context(
+    messages: tuple[LarkMessage, ...] | list[LarkMessage],
+    current_message_id: str,
+) -> tuple[LarkMessage, ...]:
+    supported = [
+        message
+        for message in messages
+        if message.message_type in {"text", "post", "image"}
+        and message.sender_type not in {"app", "bot"}
+    ]
+    current_index = next(
+        (
+            index
+            for index, message in enumerate(supported)
+            if message.message_id == current_message_id
+        ),
+        len(supported) - 1,
+    )
+    start_index = 0
+    for index, message in enumerate(supported[:current_index]):
+        if message.mentions:
+            start_index = index
+    return tuple(supported[start_index : current_index + 1])
+
+
+def extract_lark_repo_refs(
+    messages: tuple[LarkMessage, ...] | list[LarkMessage],
+) -> LarkRepoSelection:
+    repositories: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for message in messages:
+        for match in _GITHUB_REPO_URL.finditer(message.text):
+            owner = match.group("owner")
+            name = match.group("repo").removesuffix(".git")
+            key = (owner.lower(), name.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            repositories.append({"owner": owner, "name": name})
+
+    if not repositories:
+        return LarkRepoSelection("missing", None, ())
+    if len(repositories) > 1:
+        return LarkRepoSelection("ambiguous", None, tuple(repositories))
+    return LarkRepoSelection("selected", repositories[0], tuple(repositories))
+
+
+def build_lark_prompt(
+    event: LarkEvent,
+    messages: tuple[LarkMessage, ...],
+    repo: dict[str, str],
+    *,
+    sender_name: str,
+    warnings: tuple[str, ...] = (),
+) -> str:
+    conversation = (
+        "\n".join(f"- {message.text}" for message in messages if message.text.strip())
+        or "- (no text; see attached image)"
+    )
+    warning_section = "\n".join(f"- {warning}" for warning in warnings)
+    return (
+        "You were invoked from Lark.\n\n"
+        f"## Repository\n{repo['owner']}/{repo['name']}\n\n"
+        f"## Triggered by\n{sender_name or event.sender.open_id}\n\n"
+        "## Lark thread\n"
+        f"- Chat ID: {event.message.chat_id}\n"
+        f"- Root message ID: {event.message.root_message_id}\n\n"
+        f"## Conversation context\n{conversation}\n\n"
+        + (f"## Attachment warnings\n{warning_section}\n\n" if warnings else "")
+        + "Use `lark_thread_reply` for every clarification, progress update, approval, and final "
+        "summary. Use `lark_read_thread_messages` when you need refreshed Lark context. Do not "
+        "use Slack or Linear communication tools for this run."
+    )
+
+
+async def process_lark_mention(event: LarkEvent) -> None:
+    message = event.message
+    thread_id = generate_thread_id_from_lark(
+        event.tenant_key,
+        message.chat_id,
+        message.root_message_id,
+    )
+    lark_user = await get_lark_user(event.sender.open_id)
+    email = _string(lark_user.get("enterprise_email")) or _string(lark_user.get("email"))
+    sender_name = _string(lark_user.get("name")) or event.sender.open_id
+    github_login = await login_for_lark_id(event.tenant_key, event.sender.open_id)
+    if not github_login and email:
+        github_login = await login_for_email(email)
+    if not github_login:
+        settings_url = build_settings_url()
+        link = f" ({settings_url})" if settings_url else " in the Open SWE dashboard"
+        await _reply_and_finish(
+            event,
+            f"Connect Lark account{link}, then send this request again.",
+            "unmapped_user",
+        )
+        return
+
+    if not await is_user_active_org_member(github_login, LARK_GITHUB_ORG):
+        await _reply_and_finish(
+            event,
+            f"Your GitHub account `{github_login}` is not an active {LARK_GITHUB_ORG} member.",
+            "org_denied",
+        )
+        return
+
+    thread_messages = await fetch_lark_thread(message.chat_id, message.root_message_id)
+    if not any(item.message_id == message.message_id for item in thread_messages):
+        thread_messages = (*thread_messages, message)
+    context = select_lark_context(thread_messages, message.message_id)
+    selection = extract_lark_repo_refs(context)
+    if selection.status == "missing":
+        await _reply_and_finish(
+            event,
+            "Please send one GitHub repository or PR link so I know which repository to use.",
+            "missing_repo",
+        )
+        return
+    if selection.status == "ambiguous":
+        choices = ", ".join(f"`{repo['owner']}/{repo['name']}`" for repo in selection.repositories)
+        await _reply_and_finish(
+            event,
+            f"I found multiple repositories ({choices}). Please send one repository or PR link.",
+            "ambiguous_repo",
+        )
+        return
+
+    repo = selection.repo
+    if repo is None:
+        raise RuntimeError("selected Lark repository is missing")
+    if not _is_repo_allowed(repo):
+        await _reply_and_finish(
+            event,
+            f"`{repo['owner']}/{repo['name']}` is not allowed for Open SWE.",
+            "repo_denied",
+        )
+        return
+    if not await is_review_repo_enabled(repo["owner"], repo["name"]):
+        await _reply_and_finish(
+            event,
+            f"`{repo['owner']}/{repo['name']}` is not enabled in Open SWE settings.",
+            "repo_disabled",
+        )
+        return
+    app_token = await get_github_app_installation_token(repositories=[repo["name"]])
+    if not app_token:
+        await _reply_and_finish(
+            event,
+            f"The Open SWE GitHub App cannot access `{repo['owner']}/{repo['name']}`.",
+            "repo_not_installed",
+        )
+        return
+
+    image_blocks, image_warnings = await _build_lark_image_blocks(context, github_login)
+    prompt = build_lark_prompt(
+        event,
+        context,
+        repo,
+        sender_name=sender_name,
+        warnings=image_warnings,
+    )
+    content_blocks = [create_text_block(prompt), *image_blocks]
+    lark_thread = {
+        "tenant_key": event.tenant_key,
+        "chat_id": message.chat_id,
+        "root_message_id": message.root_message_id,
+        "triggering_message_id": message.message_id,
+        "triggering_user_open_id": event.sender.open_id,
+        "triggering_user_name": sender_name,
+    }
+    configurable = {
+        "repo": repo,
+        "lark_thread": lark_thread,
+        "user_email": email,
+        "source": "lark",
+        "github_login": github_login,
+    }
+    await upsert_agent_thread_owner_metadata(
+        thread_id,
+        source="lark",
+        repo_config=repo,
+        github_login=github_login,
+        user_email=email or "",
+        title=message.text or f"Lark request for {repo['owner']}/{repo['name']}",
+        source_context={"lark_thread": lark_thread},
+    )
+
+    client = get_client(url=LANGGRAPH_URL)
+    claim_record = await get_lark_event_record(event.event_id)
+    if claim_record and claim_record.attempts > 1:
+        existing_run_id = await _find_lark_event_run(client, thread_id, event.event_id)
+        if existing_run_id:
+            await mark_lark_event_dispatched(event.event_id, existing_run_id)
+            return
+    await reply_to_lark_message(
+        message.root_message_id,
+        {"text": f"Working on `{repo['owner']}/{repo['name']}` now."},
+    )
+    run = await dispatch_agent_run(
+        thread_id,
+        content_blocks,
+        configurable,
+        source="lark",
+        metadata={**_AGENT_VERSION_METADATA, "lark_event_id": event.event_id},
+        client=client,
+    )
+    run_id = run.get("run_id") if isinstance(run, dict) else None
+    if not isinstance(run_id, str) or not run_id:
+        raise RuntimeError("Lark dispatch did not return a run ID")
+    await mark_lark_event_dispatched(event.event_id, run_id)
+
+
+async def _find_lark_event_run(client: object, thread_id: str, event_id: str) -> str | None:
+    runs = await client.runs.list(thread_id, limit=100)
+    for run in runs if isinstance(runs, list) else []:
+        metadata = run.get("metadata") if isinstance(run, dict) else None
+        if isinstance(metadata, dict) and metadata.get("lark_event_id") == event_id:
+            run_id = run.get("run_id")
+            if isinstance(run_id, str) and run_id:
+                return run_id
+    return None
+
+
+async def process_lark_card_action(payload: dict[str, object]) -> dict[str, object]:
+    header = payload.get("header")
+    event = payload.get("event")
+    if not isinstance(header, dict) or not isinstance(event, dict):
+        return _card_error("Invalid approval payload.")
+    operator = event.get("operator")
+    action = event.get("action")
+    if not isinstance(operator, dict) or not isinstance(action, dict):
+        return _card_error("Invalid approval actor or action.")
+    value = action.get("value")
+    if not isinstance(value, dict):
+        return _card_error("Invalid approval value.")
+
+    tenant_key = _string(operator.get("tenant_key"))
+    actor_open_id = _string(operator.get("open_id"))
+    thread_id = _string(value.get("thread_id"))
+    action_type = _string(value.get("type"))
+    if not all((tenant_key, actor_open_id, thread_id, action_type)):
+        return _card_error("Action context is incomplete.")
+    if action_type not in {"workflow_push_approval", "plan_approval", "open_swe_option"}:
+        return _card_error("Unknown Lark card action type.")
+
+    client = get_client(url=LANGGRAPH_URL)
+    thread = await client.threads.get(thread_id)
+    metadata = thread.get("metadata") if isinstance(thread, dict) else None
+    if not isinstance(metadata, dict):
+        return _card_error("The Open SWE thread no longer exists.")
+    source_context = metadata.get("source_context")
+    lark_context = source_context.get("lark_thread") if isinstance(source_context, dict) else None
+    if not isinstance(lark_context, dict):
+        return _card_error("This is not a Lark-owned Open SWE thread.")
+    expected_tenant = _string(lark_context.get("tenant_key")) or LARK_TENANT_KEY
+    owner_open_id = _string(lark_context.get("triggering_user_open_id"))
+    if not expected_tenant or tenant_key != expected_tenant:
+        return _card_error("This action belongs to a different Lark tenant.")
+    actor_login = await login_for_lark_id(tenant_key, actor_open_id)
+    owner_login = _string(metadata.get("github_login"))
+    if (
+        not actor_login
+        or actor_login != owner_login
+        or not owner_open_id
+        or actor_open_id != owner_open_id
+    ):
+        return _card_error("Only the person who requested this run can use this action.")
+
+    if action_type == "open_swe_option":
+        action_id = _string(value.get("action_id"))
+        response = _string(value.get("response"))
+        if not action_id or not response:
+            return _card_error("Option action context is incomplete.")
+        lock = _lark_approval_locks.setdefault((thread_id, action_id), asyncio.Lock())
+        async with lock:
+            if not await _claim_lark_action_once(client, thread_id, action_id):
+                if await _lark_followup_exists(client, thread_id, action_id):
+                    return _card_success(
+                        "Selection received. Open SWE will continue in this thread."
+                    )
+                return _card_error("That option was already selected.")
+            resumed = False
+            try:
+                resumed = await _dispatch_lark_followup(
+                    client,
+                    metadata,
+                    thread_id,
+                    response,
+                    action_id=action_id,
+                )
+                if not resumed:
+                    return _card_error("The option was selected, but Open SWE could not resume.")
+            finally:
+                if not resumed:
+                    await _release_lark_action_claim(client, thread_id, action_id)
+        return _card_success("Selection received. Open SWE will continue in this thread.")
+
+    fingerprint = _string(value.get("fingerprint"))
+    decision = _string(value.get("action"))
+    if not fingerprint or decision not in {"approve", "reject"}:
+        return _card_error("Approval context is incomplete.")
+
+    lock = _lark_approval_locks.setdefault((thread_id, fingerprint), asyncio.Lock())
+    async with lock:
+        if action_type == "workflow_push_approval":
+            return await _process_workflow_card_decision(
+                client,
+                metadata,
+                thread_id,
+                fingerprint,
+                decision,
+                actor_open_id,
+            )
+        return await _process_plan_card_decision(
+            client,
+            thread_id,
+            fingerprint,
+            decision,
+            actor_open_id,
+        )
+
+
+async def _process_workflow_card_decision(
+    client: object,
+    metadata: dict[str, object],
+    thread_id: str,
+    fingerprint: str,
+    decision: str,
+    actor_open_id: str,
+) -> dict[str, object]:
+    approvals = await get_workflow_push_approvals(thread_id)
+    record = approvals.get(fingerprint)
+    if not isinstance(record, dict):
+        return _card_error("That workflow approval fingerprint is no longer pending.")
+    expected_status = "approved" if decision == "approve" else "rejected"
+    retrying_saved_decision = (
+        record.get("status") == expected_status
+        and record.get("decided_by") == actor_open_id
+        and not record.get("lark_followup_dispatched")
+    )
+    if record.get("status") != "pending" and not retrying_saved_decision:
+        return _card_error("That workflow approval was already decided.")
+    if record.get("status") == "pending" and _approval_expired(record):
+        return _card_error("That workflow approval has expired. Trigger the push again.")
+    if not await _claim_lark_action_once(client, thread_id, fingerprint):
+        if await _lark_followup_exists(client, thread_id, fingerprint):
+            return _card_success(
+                "Workflow decision received. Open SWE will continue in this thread."
+            )
+        return _card_error("That workflow approval was already decided.")
+
+    approved = decision == "approve"
+    resumed = False
+    try:
+        if not retrying_saved_decision:
+            updated = await decide_workflow_push_approval(
+                thread_id,
+                fingerprint,
+                approved=approved,
+                actor=actor_open_id,
+            )
+            if updated is None:
+                return _card_error("That workflow approval no longer exists.")
+            approvals[fingerprint] = updated
+        instruction = (
+            "Retry the blocked git push now. The exact workflow fingerprint was approved; "
+            "do not alter workflow files before pushing."
+            if approved
+            else "The workflow push was rejected. Do not push the workflow-file changes."
+        )
+        resumed = await _dispatch_lark_followup(
+            client,
+            metadata,
+            thread_id,
+            instruction,
+            action_id=fingerprint,
+        )
+        if not resumed:
+            return _card_error("The decision was saved, but Open SWE could not resume.")
+        approvals[fingerprint]["lark_followup_dispatched"] = True
+        await client.threads.update(
+            thread_id=thread_id,
+            metadata={"workflow_push_approvals": approvals},
+        )
+    finally:
+        if not resumed:
+            await _release_lark_action_claim(client, thread_id, fingerprint)
+    return _card_success(
+        "Workflow push approved. Open SWE will retry the exact blocked push."
+        if approved
+        else "Workflow push rejected. No workflow files will be pushed."
+    )
+
+
+async def _process_plan_card_decision(
+    client: object,
+    thread_id: str,
+    fingerprint: str,
+    decision: str,
+    actor_open_id: str,
+) -> dict[str, object]:
+    thread = await client.threads.get(thread_id)
+    metadata = thread.get("metadata") if isinstance(thread, dict) else None
+    if not isinstance(metadata, dict):
+        return _card_error("The Open SWE thread no longer exists.")
+    raw_approvals = metadata.get("lark_plan_approvals")
+    approvals = dict(raw_approvals) if isinstance(raw_approvals, dict) else {}
+    record = approvals.get(fingerprint)
+    if not isinstance(record, dict):
+        return _card_error("That plan approval fingerprint is no longer pending.")
+    expected_status = "approved" if decision == "approve" else "rejected"
+    retrying_saved_decision = (
+        record.get("status") == expected_status
+        and record.get("actor_open_id") == actor_open_id
+        and not record.get("lark_followup_dispatched")
+    )
+    if record.get("status") != "pending" and not retrying_saved_decision:
+        return _card_error("That plan approval was already decided.")
+    if record.get("status") == "pending" and _approval_expired(record):
+        return _card_error("That plan approval has expired. Ask Open SWE for a fresh plan card.")
+    if not await _claim_lark_action_once(client, thread_id, fingerprint):
+        if await _lark_followup_exists(client, thread_id, fingerprint):
+            return _card_success("Plan decision received. Open SWE will continue in this thread.")
+        return _card_error("That plan approval was already decided.")
+    resumed = False
+    try:
+        if not retrying_saved_decision:
+            record = dict(record)
+            record.update(
+                status=expected_status,
+                decision=decision,
+                actor_open_id=actor_open_id,
+                decided_at=datetime.now(UTC).isoformat(),
+            )
+            approvals[fingerprint] = record
+            await client.threads.update(
+                thread_id=thread_id,
+                metadata={"lark_plan_approvals": approvals, "plan_mode": decision != "approve"},
+            )
+        instruction = (
+            "Proceed with the approved plan and implement it now."
+            if decision == "approve"
+            else "The plan was rejected. Stay in plan mode and ask what should be revised."
+        )
+        resumed = await _dispatch_lark_followup(
+            client,
+            metadata,
+            thread_id,
+            instruction,
+            action_id=fingerprint,
+            plan_mode=decision != "approve",
+        )
+        if not resumed:
+            return _card_error("The plan decision was saved, but Open SWE could not resume.")
+        approvals[fingerprint]["lark_followup_dispatched"] = True
+        await client.threads.update(
+            thread_id=thread_id,
+            metadata={"lark_plan_approvals": approvals},
+        )
+    finally:
+        if not resumed:
+            await _release_lark_action_claim(client, thread_id, fingerprint)
+    return _card_success(
+        "Plan approved; implementation will continue."
+        if decision == "approve"
+        else "Plan rejected."
+    )
+
+
+async def _claim_lark_action_once(client: object, thread_id: str, action_id: str) -> bool:
+    claim_id = _lark_action_claim_id(thread_id, action_id)
+    try:
+        await client.threads.create(
+            thread_id=claim_id,
+            if_exists="raise",
+            metadata={"kind": "lark_internal_claim", "source_thread_id": thread_id},
+            ttl=max(1, math.ceil(LARK_APPROVAL_TTL_SECONDS / 60)),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        status_code = getattr(exc, "status_code", None)
+        response = getattr(exc, "response", None)
+        if status_code == 409 or getattr(response, "status_code", None) == 409:
+            return False
+        raise
+
+
+def _lark_action_claim_id(thread_id: str, action_id: str) -> str:
+    return str(uuid5(NAMESPACE_URL, f"open-swe:lark-action:{thread_id}:{action_id}"))
+
+
+async def _release_lark_action_claim(client: object, thread_id: str, action_id: str) -> None:
+    try:
+        await client.threads.delete(_lark_action_claim_id(thread_id, action_id))
+    except Exception:  # noqa: BLE001
+        return
+
+
+async def _dispatch_lark_followup(
+    client: object,
+    metadata: dict[str, object],
+    thread_id: str,
+    text: str,
+    *,
+    action_id: str,
+    plan_mode: bool | None = None,
+) -> bool:
+    source_context = metadata.get("source_context")
+    lark_thread = source_context.get("lark_thread") if isinstance(source_context, dict) else None
+    if not isinstance(lark_thread, dict):
+        return False
+    configurable = {
+        "repo": metadata.get("repo"),
+        "lark_thread": lark_thread,
+        "user_email": metadata.get("user_email"),
+        "source": "lark",
+        "github_login": metadata.get("github_login"),
+        "plan_mode": metadata.get("plan_mode") if plan_mode is None else plan_mode,
+    }
+    if await _lark_followup_exists(client, thread_id, action_id):
+        return True
+    run = await dispatch_agent_run(
+        thread_id,
+        text,
+        configurable,
+        source="lark",
+        metadata={**_AGENT_VERSION_METADATA, "lark_action_id": action_id},
+        client=client,
+    )
+    return isinstance(run, dict) and isinstance(run.get("run_id"), str)
+
+
+async def _lark_followup_exists(client: object, thread_id: str, action_id: str) -> bool:
+    runs = await client.runs.list(thread_id, limit=100)
+    for run in runs if isinstance(runs, list) else []:
+        metadata = run.get("metadata") if isinstance(run, dict) else None
+        if isinstance(metadata, dict) and metadata.get("lark_action_id") == action_id:
+            return True
+    return False
+
+
+def _approval_expired(record: dict[str, object]) -> bool:
+    requested_at = _string(record.get("requested_at"))
+    if not requested_at:
+        return True
+    try:
+        requested = datetime.fromisoformat(requested_at)
+    except ValueError:
+        return True
+    if requested.tzinfo is None:
+        requested = requested.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - requested).total_seconds() > LARK_APPROVAL_TTL_SECONDS
+
+
+def _card_success(message: str) -> dict[str, object]:
+    return _card_response("success", message)
+
+
+def _card_error(message: str) -> dict[str, object]:
+    return _card_response("error", message)
+
+
+def _card_response(toast_type: str, message: str) -> dict[str, object]:
+    return {
+        "toast": {"type": toast_type, "content": message},
+        "card": {
+            "type": "raw",
+            "data": {
+                "schema": "2.0",
+                "body": {"elements": [{"tag": "markdown", "content": message}]},
+            },
+        },
+    }
+
+
+async def _build_lark_image_blocks(
+    messages: tuple[LarkMessage, ...],
+    github_login: str,
+) -> tuple[list[dict[str, object]], tuple[str, ...]]:
+    attachments = [
+        (message.message_id, image_key) for message in messages for image_key in message.image_keys
+    ][:LARK_IMAGE_MAX_COUNT]
+    if not attachments:
+        return [], ()
+
+    model_id = await resolve_agent_model_id(github_login)
+    if not model_supports_images(model_id):
+        return [], (f"The selected model `{model_id}` does not support images.",)
+
+    blocks: list[dict[str, object]] = []
+    warnings: list[str] = []
+    total_bytes = 0
+    for message_id, image_key in attachments:
+        try:
+            data = await download_lark_image(message_id, image_key)
+        except Exception:  # noqa: BLE001
+            warnings.append(f"Image `{image_key}` could not be downloaded and was skipped.")
+            continue
+        if len(data) > LARK_IMAGE_MAX_BYTES:
+            warnings.append(f"Image `{image_key}` was too large and was skipped.")
+            continue
+        if total_bytes + len(data) > LARK_IMAGE_TOTAL_MAX_BYTES:
+            warnings.append(
+                "The total image size limit was reached; remaining images were skipped."
+            )
+            break
+        mime_type = _image_mime_type(data)
+        if mime_type is None:
+            warnings.append(f"Image `{image_key}` had an unsupported format and was skipped.")
+            continue
+        total_bytes += len(data)
+        blocks.append(
+            create_image_block(base64=base64.b64encode(data).decode("ascii"), mime_type=mime_type)
+        )
+    return blocks, tuple(warnings)
+
+
+async def _reply_and_finish(event: LarkEvent, text: str, reason: str) -> None:
+    await reply_to_lark_message(event.message.root_message_id, {"text": text})
+    await mark_lark_event_dispatched(event.event_id, f"handled:{reason}")
+
+
+def _image_mime_type(data: bytes) -> str | None:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _string(value: object) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
