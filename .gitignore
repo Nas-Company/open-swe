@@ -70,3 +70,6 @@ __pycache__/
 
 # Local Superpowers brainstorming companion
 .superpowers/
+
+# Local implementation worktrees
+.worktrees/
