@@ -523,12 +523,7 @@ def _read_binary_file(
         raise RuntimeError(
             f"GitHub broker artifact is {size} bytes; the configured limit is {max_bytes} bytes"
         )
-    handle = sandbox.open(path, "rb")
-    try:
-        content = handle.read()
-    finally:
-        with contextlib.suppress(Exception):
-            handle.close()
+    content = sandbox.filesystem.read_bytes(path)
     if isinstance(content, memoryview):
         return content.tobytes()
     if isinstance(content, str):
@@ -537,12 +532,7 @@ def _read_binary_file(
 
 
 def _write_binary_file(sandbox: modal.Sandbox, path: str, content: bytes) -> None:
-    handle = sandbox.open(path, "wb")
-    try:
-        handle.write(content)
-    finally:
-        with contextlib.suppress(Exception):
-            handle.close()
+    sandbox.filesystem.write_bytes(content, path)
 
 
 def _broker_clean_env() -> dict[str, str | None]:
