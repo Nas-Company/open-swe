@@ -29,6 +29,7 @@ dependencies = [
     "exa-py>=2.13.0",
     "langchain-google-genai>=4.2.4",
     "langchain-mcp-adapters>=0.2.2",
+    "lark-oapi>=1.6.9",
 ]
 
 [project.optional-dependencies]
