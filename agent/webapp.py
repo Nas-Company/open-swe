@@ -1428,9 +1428,9 @@ async def slack_webhook_verify() -> dict[str, str]:
 
 
 @app.get("/health")
-async def health_check() -> dict[str, str]:
+async def health_check() -> dict[str, str | bool]:
     """Health check endpoint."""
-    return {"status": "healthy"}
+    return {"status": "healthy", "lark_configured": lark_configured()}
 
 
 @app.post("/webhooks/run-complete")

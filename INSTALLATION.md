@@ -401,6 +401,48 @@ The dashboard can let a user link their Slack identity to their GitHub login via
 
 If `SLACK_CLIENT_ID`/`SLACK_CLIENT_SECRET` are unset, the "Sign in with Slack" link is simply disabled; the rest of Slack triggering still works.
 
+### Lark (optional)
+
+Open SWE supports a tenant-scoped Lark bot, threaded replies, protected image attachments,
+self-service GitHub account linking, and interactive plan/workflow approvals.
+
+1. In the [Lark Developer Console](https://open.larksuite.com/app), create or open a custom app.
+2. Under **App Features → Bot**, enable the bot and set its display name to exactly `openswe`.
+3. Under **Permissions & Scopes**, grant these application-identity tenant scopes:
+   - `im:message` — get and send messages
+   - `im:message:send_as_bot` — reply as `openswe`
+   - `im:message:readonly` — read the invoking Lark thread
+   - `im:message.group_at_msg:readonly` — receive group messages that structurally mention the bot
+   - `im:message.p2p_msg:readonly` — receive direct messages to the bot
+   - `im:resource` — download protected image attachments
+   - `contact:user.base:readonly` — resolve the sender's Lark identity and display name
+   - `contact:user.email:readonly` — optional email fallback for an existing mapping
+4. Under **Events & Callbacks**, choose webhook delivery and configure:
+   - Event request URL: `https://<your-backend-url>/webhooks/lark`
+   - Event: **Receive message** (`im.message.receive_v1`), using application identity
+   - Card callback URL: `https://<your-backend-url>/webhooks/lark/card`
+   - Card callback: **Card action trigger** (`card.action.trigger`)
+   - Generate a Verification Token and Encrypt Key and save them as
+     `LARK_VERIFICATION_TOKEN` and `LARK_ENCRYPT_KEY`.
+5. Under **Security Settings → Redirect URLs**, add:
+   - Local: `http://localhost:2024/dashboard/api/lark/callback`
+   - Production: `https://<your-dashboard-api-url>/dashboard/api/lark/callback`
+   The user-identity OAuth scope is `contact:user.base:readonly`.
+6. Copy the App ID, App Secret, and tenant key into `LARK_APP_ID`, `LARK_APP_SECRET`, and
+   `LARK_TENANT_KEY`. Set `LARK_GITHUB_ORG` to the GitHub organization whose active members may
+   invoke the bot.
+7. Create and publish an app version. New scopes, callbacks, bot settings, and redirect URLs do
+   not take effect until the version is approved and published. Add the published bot to each
+   Lark group where it should be available.
+8. Each user signs into the Open SWE dashboard with GitHub, opens **Profile Settings → User
+   mapping**, and clicks **Connect Lark**. This binds the verified Lark open ID to the signed-in
+   GitHub login; the two accounts do not need matching email addresses.
+
+Open SWE only accepts a group request when `openswe` is present in the structured mention list.
+Direct messages need no mention. The invoking thread must contain exactly one GitHub repository
+or pull-request URL; otherwise the bot asks the user to provide or choose one and never falls back
+to a default repository.
+
 ## 6. Environment variables
 
 Create a `.env` file in the project root. Below is the full list — only fill in the sections relevant to the triggers you configured.
@@ -499,6 +541,19 @@ SLACK_REPO_NAME=""
 SLACK_CLIENT_ID=""
 SLACK_CLIENT_SECRET=""
 SLACK_TEAM_ID=""                       # Optional; restrict linking to one workspace (T...)
+
+# === Lark (if using Lark trigger) ===
+LARK_APP_ID=""
+LARK_APP_SECRET=""
+LARK_VERIFICATION_TOKEN=""
+LARK_ENCRYPT_KEY=""
+LARK_TENANT_KEY=""                    # Restricts events and account linking to one tenant
+LARK_GITHUB_ORG="Nas-Company"         # Active members of this GitHub org may invoke the bot
+# Optional safety bounds; defaults shown.
+LARK_IMAGE_MAX_COUNT="4"
+LARK_IMAGE_MAX_BYTES="10485760"
+LARK_IMAGE_TOTAL_MAX_BYTES="20971520"
+LARK_APPROVAL_TTL_SECONDS="900"
 
 # === Exa (optional — enables web search tool) ===
 EXA_API_KEY=""                         # From https://dashboard.exa.ai
@@ -622,6 +677,19 @@ Other UI scripts: `bun run build`, `bun run typecheck`, `bun run lint`, `bun run
 2. Mention the bot: `@open-swe what's in the repo?`
 3. You should see a reply in the thread with the agent's response.
 
+### Lark
+
+1. Sign into the dashboard with GitHub, open **Profile Settings**, and click **Connect Lark**.
+2. In a group containing the bot, send:
+   `@openswe review https://github.com/your-org/your-repo/pull/123`
+3. Confirm the acknowledgement and all later replies appear beneath the same Lark root message.
+4. Direct-message the bot with the same GitHub URL but without an `@openswe` mention; it should
+   also start one run.
+5. Send `@openswe please review this` without a GitHub URL; the bot should ask for one and must
+   not start a run.
+6. For a harmless plan or workflow-file change, verify only the original mapped user can use the
+   approval card and a second click is rejected as already decided.
+
 ### Dashboard
 
 1. With the backend (step 7) and UI (step 8) both running, open `http://localhost:3000`
@@ -637,7 +705,7 @@ Production runs the backend and dashboard separately.
 1. Push your code to a GitHub repository
 2. Connect the repo to LangGraph Cloud
 3. Set all environment variables from step 6 in the deployment config. Set `DASHBOARD_BASE_URL` and `LANGGRAPH_URL` to your production URLs (all `https://`). Set `DASHBOARD_API_BASE_URL` to the URL browsers use for dashboard API requests and OAuth callbacks: either the backend URL for direct cross-origin calls, or the dashboard/Vercel URL when a same-origin rewrite proxies `/dashboard/api/*`.
-4. Update your webhook URLs (Linear, Slack, GitHub App) and the GitHub App / Slack OAuth callback URLs to your production URLs (replace the ngrok / localhost values). The dashboard GitHub App callback must be `<DASHBOARD_API_BASE_URL>/dashboard/api/auth/callback`.
+4. Update your webhook URLs (Linear, Slack, Lark, GitHub App) and the GitHub App / Slack / Lark OAuth callback URLs to your production URLs (replace the ngrok / localhost values). The dashboard GitHub App callback must be `<DASHBOARD_API_BASE_URL>/dashboard/api/auth/callback`; Lark uses `<DASHBOARD_API_BASE_URL>/dashboard/api/lark/callback`.
 
 The `langgraph.json` at the project root defines the five graphs and the HTTP app:
 
