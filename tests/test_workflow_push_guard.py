@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -101,6 +102,23 @@ class _Request:
         next_request = _Request()
         next_request.tool_call = kwargs.get("tool_call", self.tool_call)
         return next_request
+
+
+class _LarkRuntime:
+    config = {
+        "configurable": {
+            "thread_id": "thread-1",
+            "lark_thread": {
+                "chat_id": "oc-chat",
+                "root_message_id": "om-root",
+                "tenant_key": "tenant-a",
+            },
+        }
+    }
+
+
+class _LarkRequest(_Request):
+    runtime = _LarkRuntime()
 
 
 @pytest.fixture(autouse=True)
@@ -336,6 +354,36 @@ async def test_unapproved_workflow_push_blocks_and_posts_slack(
     assert payload["files"] == [".github/workflows/ci.yml"]
     assert posted["channel_id"] == "C123"
     assert posted["blocks"][1]["elements"][0]["value"]
+
+
+async def test_unapproved_workflow_push_posts_lark_approval_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guard.SANDBOX_BACKENDS["thread-1"] = _Backend()
+    reply = AsyncMock(return_value=SimpleNamespace(ok=True, message_id="om-card"))
+    notified = AsyncMock()
+    monkeypatch.setattr(guard, "workflow_push_approved", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        guard,
+        "ensure_workflow_push_pending",
+        AsyncMock(
+            return_value=(
+                {"fingerprint": "expected", "status": "pending", "notified": False},
+                True,
+            )
+        ),
+    )
+    monkeypatch.setattr(guard, "reply_to_lark_message", reply, raising=False)
+    monkeypatch.setattr(guard, "mark_workflow_push_notified", notified)
+
+    result = await guard.WorkflowPushGuardMiddleware().awrap_tool_call(_LarkRequest(), AsyncMock())
+
+    assert isinstance(result, ToolMessage)
+    reply.assert_awaited_once()
+    assert reply.await_args.kwargs["msg_type"] == "interactive"
+    card = reply.await_args.args[1]
+    assert card["body"]["elements"][1]["actions"][0]["value"]["type"] == ("workflow_push_approval")
+    notified.assert_awaited_once()
 
 
 async def test_approved_workflow_push_elevates_and_restores(

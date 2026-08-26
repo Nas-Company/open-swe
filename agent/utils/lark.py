@@ -193,6 +193,46 @@ def verify_lark_message_event(
     )
 
 
+def verify_lark_card_action(
+    body: bytes,
+    headers: Mapping[str, str],
+) -> dict[str, Any]:
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"lark_oapi\..*")
+        import lark_oapi
+        from lark_oapi.core.model import RawRequest
+        from lark_oapi.event.callback.model.p2_card_action_trigger import (
+            P2CardActionTriggerResponse,
+        )
+
+    captured: list[Any] = []
+
+    def capture(event: Any) -> Any:
+        captured.append(event)
+        return P2CardActionTriggerResponse({"toast": {"type": "success", "content": "Received"}})
+
+    dispatcher = (
+        lark_oapi.EventDispatcherHandler.builder(LARK_ENCRYPT_KEY, LARK_VERIFICATION_TOKEN)
+        .register_p2_card_action_trigger(capture)
+        .build()
+    )
+    raw_request = RawRequest()
+    raw_request.uri = "/webhooks/lark/card"
+    raw_request.body = body
+    raw_request.headers = {
+        "X-Lark-Request-Timestamp": headers.get("X-Lark-Request-Timestamp", ""),
+        "X-Lark-Request-Nonce": headers.get("X-Lark-Request-Nonce", ""),
+        "X-Lark-Signature": headers.get("X-Lark-Signature", ""),
+    }
+    sdk_response = dispatcher.do(raw_request)
+    if sdk_response.status_code != 200 or not captured:
+        raise LarkApiError("Lark card callback verification failed", code=sdk_response.status_code)
+    payload = json.loads(lark_oapi.JSON.marshal(captured[0]))
+    if not isinstance(payload, dict):
+        raise LarkApiError("Lark card callback payload is invalid")
+    return payload
+
+
 async def get_lark_tenant_token(*, force_refresh: bool = False) -> str:
     global _tenant_token
 

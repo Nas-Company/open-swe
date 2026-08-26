@@ -98,6 +98,7 @@ from .utils.lark import (
     LarkEvent,
     get_lark_bot_open_id,
     lark_configured,
+    verify_lark_card_action,
     verify_lark_message_event,
 )
 from .utils.lark_events import claim_lark_event, mark_lark_event_failed
@@ -1025,6 +1026,12 @@ async def _process_lark_event(event: LarkEvent) -> None:
         await mark_lark_event_failed(event.event_id, "processing_failed")
 
 
+async def _process_lark_card_action(payload: dict[str, Any]) -> dict[str, Any]:
+    from .webhooks.lark import process_lark_card_action
+
+    return await process_lark_card_action(payload)
+
+
 @app.post("/webhooks/lark")
 async def lark_webhook(
     request: Request,
@@ -1083,6 +1090,21 @@ async def lark_webhook(
 @app.get("/webhooks/lark")
 async def lark_webhook_verify() -> dict[str, str]:
     return {"status": "ok", "message": "Lark webhook endpoint is active"}
+
+
+@app.post("/webhooks/lark/card")
+async def lark_card_callback(request: Request) -> dict[str, Any]:
+    if not lark_configured():
+        raise HTTPException(status_code=503, detail="Lark integration is not configured")
+    body = await request.body()
+    try:
+        payload = verify_lark_card_action(body, request.headers)
+        return await _process_lark_card_action(payload)
+    except LarkApiError as exc:
+        logger.warning("Rejected Lark card callback: %s", exc)
+        raise HTTPException(status_code=401, detail="Invalid Lark card callback") from exc
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid Lark card action") from exc
 
 
 @app.post("/webhooks/slack")

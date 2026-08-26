@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -44,6 +45,44 @@ async def test_reply_rejects_missing_thread_config(monkeypatch: pytest.MonkeyPat
 
     assert result["success"] is False
     assert "root_message_id" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_stores_random_pending_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    updates: list[dict[str, object]] = []
+    threads = SimpleNamespace(
+        get=AsyncMock(return_value={"metadata": {}}),
+        update=AsyncMock(side_effect=lambda **kwargs: updates.append(kwargs["metadata"])),
+    )
+    post = AsyncMock(return_value=MagicMock(ok=True, message_id="om-card"))
+    monkeypatch.setattr(
+        reply_module,
+        "get_config",
+        lambda: {
+            "configurable": {
+                "thread_id": "thread-1",
+                "lark_thread": {"root_message_id": "om-root"},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        reply_module, "get_client", lambda **_kwargs: SimpleNamespace(threads=threads)
+    )
+    monkeypatch.setattr(reply_module, "reply_to_lark_message", post)
+
+    await lark_thread_reply("Implement this plan", plan_approval=True)
+
+    approvals = updates[0]["lark_plan_approvals"]
+    assert isinstance(approvals, dict)
+    fingerprint, record = next(iter(approvals.items()))
+    assert len(fingerprint) >= 32
+    assert record["status"] == "pending"
+    assert (
+        post.await_args.args[1]["body"]["elements"][1]["actions"][0]["value"]["fingerprint"]
+        == fingerprint
+    )
 
 
 @pytest.mark.asyncio
