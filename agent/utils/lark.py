@@ -51,6 +51,8 @@ class LarkMessage:
     text: str
     mentions: tuple[str, ...]
     image_keys: tuple[str, ...]
+    sender_id: str = ""
+    sender_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,7 @@ def parse_lark_event(body: bytes) -> LarkEvent:
             text=str(content.get("text", "")),
             mentions=mentions,
             image_keys=image_keys,
+            sender_id=str(sender_ids.get("open_id", "")),
         ),
     )
 
@@ -366,6 +369,7 @@ def _normalize_api_message(payload: dict[str, Any]) -> LarkMessage:
     body = payload.get("body", {})
     content = _parse_content(body.get("content") if isinstance(body, dict) else None)
     image_key = str(content.get("image_key", ""))
+    sender = payload.get("sender", {})
     return LarkMessage(
         message_id=message_id,
         root_message_id=str(payload.get("root_id") or message_id),
@@ -376,6 +380,8 @@ def _normalize_api_message(payload: dict[str, Any]) -> LarkMessage:
         text=str(content.get("text", "")),
         mentions=(),
         image_keys=(image_key,) if message_type == "image" and image_key else (),
+        sender_id=str(sender.get("id", "")) if isinstance(sender, dict) else "",
+        sender_name=str(sender.get("name", "")) if isinstance(sender, dict) else "",
     )
 
 

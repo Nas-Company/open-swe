@@ -22,6 +22,7 @@ from .github_token import (
     get_github_token_source_for_thread,
 )
 from .http import DEFAULT_HTTP_TIMEOUT
+from .lark import reply_to_lark_message
 from .linear import comment_on_linear_issue
 from .slack import post_slack_thread_reply
 
@@ -75,23 +76,27 @@ def is_bot_token_only_mode() -> bool:
 def _retry_instruction(source: str) -> str:
     if source == "slack":
         return "Once authenticated, mention me again in this Slack thread to retry."
+    if source == "lark":
+        return "Once authenticated, mention me again in this Lark thread to retry."
     return "Once authenticated, reply to this issue mentioning @openswe to retry."
 
 
 def _source_account_label(source: str) -> str:
     if source == "slack":
         return "Slack"
+    if source == "lark":
+        return "Lark"
     return "Linear"
 
 
 def _auth_link_text(source: str, auth_url: str) -> str:
-    if source == "slack":
+    if source in {"slack", "lark"}:
         return auth_url
     return f"[Authenticate with GitHub]({auth_url})"
 
 
 def _work_item_label(source: str) -> str:
-    if source == "slack":
+    if source in {"slack", "lark"}:
         return "thread"
     return "issue"
 
@@ -285,6 +290,24 @@ async def leave_failure_comment(
                 f"connect your Slack account in {link}, then tag me again.",
             )
         return
+    if source == "lark":
+        lark_thread = configurable.get("lark_thread", {})
+        root_message_id = (
+            lark_thread.get("root_message_id") if isinstance(lark_thread, dict) else None
+        )
+        if root_message_id:
+            from ..dashboard.oauth import build_settings_url
+
+            settings_url = build_settings_url()
+            link = settings_url or "your Open SWE settings"
+            await reply_to_lark_message(
+                root_message_id,
+                {
+                    "text": "I couldn't resolve your GitHub account for this run. Sign in with "
+                    f"GitHub and connect your Lark account in {link}, then mention me again."
+                },
+            )
+        return
     if source in ("github", "github_push"):
         logger.warning(
             "Auth failure for GitHub-triggered run (no token to post comment): %s", message
@@ -473,7 +496,7 @@ async def resolve_github_token(config: RunnableConfig, thread_id: str) -> tuple[
     # for sources that carry a mapped GitHub login (Slack, dashboard). This is
     # what lets the agent open PRs as the triggering user.
     if (
-        source in ("slack", "dashboard", "schedule")
+        source in ("slack", "lark", "dashboard", "schedule")
         and isinstance(github_login, str)
         and github_login.strip()
     ):

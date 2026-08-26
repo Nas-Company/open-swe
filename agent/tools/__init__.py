@@ -2,6 +2,8 @@ from .add_finding import add_finding
 from .enter_plan_mode import enter_plan_mode
 from .fetch_url import fetch_url
 from .http_request import http_request
+from .lark_read_thread_messages import lark_read_thread_messages
+from .lark_thread_reply import lark_thread_reply
 from .linear_comment import linear_comment
 from .linear_create_issue import linear_create_issue
 from .linear_delete_issue import linear_delete_issue
@@ -38,6 +40,8 @@ __all__ = [
     "linear_get_issue_comments",
     "linear_list_teams",
     "linear_update_issue",
+    "lark_read_thread_messages",
+    "lark_thread_reply",
     "list_findings",
     "list_review_findings",
     "open_pull_request",
