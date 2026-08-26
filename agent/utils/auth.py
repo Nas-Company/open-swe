@@ -18,6 +18,8 @@ from .github_token import (
     GitHubTokenSource,
     cache_github_token_for_thread,
     get_github_token_from_thread,
+    get_github_token_principal_for_thread,
+    get_github_token_source_for_thread,
 )
 from .http import DEFAULT_HTTP_TIMEOUT
 from .linear import comment_on_linear_issue
@@ -297,8 +299,15 @@ def _cache_resolved_github_token(
     expires_at: str | None = None,
     *,
     source: GitHubTokenSource = "user",
+    principal: str | None = None,
 ) -> tuple[str, str | None]:
-    cache_github_token_for_thread(thread_id, token, expires_at=expires_at, source=source)
+    cache_github_token_for_thread(
+        thread_id,
+        token,
+        expires_at=expires_at,
+        source=source,
+        principal=principal,
+    )
     return token, expires_at
 
 
@@ -366,7 +375,9 @@ async def resolve_token_from_email(
 
     expires_at = auth_result.get("expires_at") if isinstance(auth_result, dict) else None
     return _cache_resolved_github_token(
-        thread_id, token, expires_at=expires_at if isinstance(expires_at, str) else None
+        thread_id,
+        token,
+        expires_at=expires_at if isinstance(expires_at, str) else None,
     )
 
 
@@ -387,7 +398,10 @@ async def _resolve_dashboard_user_token(
     record = await get_oauth_record(OAUTH_TOKENS_NAMESPACE, login)
     expires_at = record.get("token_expires_at") if isinstance(record, dict) else None
     return _cache_resolved_github_token(
-        thread_id, token, expires_at=expires_at if isinstance(expires_at, str) else None
+        thread_id,
+        token,
+        expires_at=expires_at if isinstance(expires_at, str) else None,
+        principal=login,
     )
 
 
@@ -396,13 +410,10 @@ async def _resolve_bot_installation_token(thread_id: str) -> tuple[str, str | No
     bot_token, expires_at = await get_github_app_installation_token_with_expiry()
     if not bot_token:
         raise RuntimeError(
-            "Bot-token-only mode is active (LANGSMITH_API_KEY_PROD set without "
-            "X_SERVICE_AUTH_JWT_SECRET) but the GitHub App is not configured. "
+            "GitHub App installation token unavailable. "
             "Set GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, and GITHUB_APP_INSTALLATION_ID."
         )
-    logger.info(
-        "Using GitHub App installation token for thread %s (bot-token-only mode)", thread_id
-    )
+    logger.info("Using GitHub App installation token for thread %s", thread_id)
     return _cache_resolved_github_token(
         thread_id,
         bot_token,
@@ -432,6 +443,32 @@ async def resolve_github_token(config: RunnableConfig, thread_id: str) -> tuple[
 
     github_login = configurable.get("github_login")
 
+    if source == "github":
+        if is_bot_token_only_mode():
+            return await _resolve_bot_installation_token(thread_id)
+
+        login = github_login.strip() if isinstance(github_login, str) else ""
+        cached_token, cached_expires_at = await get_github_token_from_thread(thread_id)
+        cached_source = get_github_token_source_for_thread(thread_id)
+        cached_principal = get_github_token_principal_for_thread(thread_id)
+        if cached_token and (
+            cached_source == "app"
+            or (cached_source == "user" and login and cached_principal == login.lower())
+        ):
+            return cached_token, cached_expires_at
+
+        if login:
+            user_token = await _resolve_dashboard_user_token(thread_id, login)
+            if user_token is not None:
+                return user_token
+
+        logger.info(
+            "No GitHub OAuth token for '%s' on thread %s; falling back to GitHub App",
+            login or "unknown",
+            thread_id,
+        )
+        return await _resolve_bot_installation_token(thread_id)
+
     # Per-user OAuth from the dashboard store wins even in bot-token-only mode,
     # for sources that carry a mapped GitHub login (Slack, dashboard). This is
     # what lets the agent open PRs as the triggering user.
@@ -457,16 +494,6 @@ async def resolve_github_token(config: RunnableConfig, thread_id: str) -> tuple[
         return await _resolve_bot_installation_token(thread_id)
 
     try:
-        if source == "github":
-            cached_token, cached_expires_at = await get_github_token_from_thread(thread_id)
-            if cached_token:
-                return cached_token, cached_expires_at
-            from ..dashboard.user_mappings import email_for_login
-
-            email = await email_for_login(github_login)
-            if not email:
-                raise ValueError(f"No email mapping found for GitHub user '{github_login}'")
-            return await resolve_token_from_email(email, source)
         return await resolve_token_from_email(configurable.get("user_email"), source)
     except ValueError as exc:
         logger.error("GitHub auth failed for thread %s: %s", thread_id, str(exc))
