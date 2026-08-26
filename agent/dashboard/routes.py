@@ -36,6 +36,14 @@ from .enabled_repos import (
 from .eval_jobs import (
     get_reviewer_eval_status,
 )
+from .lark_oauth import (
+    LARK_STATE_COOKIE_NAME,
+    build_lark_authorize_url,
+    exchange_lark_code,
+    fetch_lark_identity,
+    lark_oauth_configured,
+    verify_lark_tenant,
+)
 from .notion_oauth import (
     NOTION_STATE_COOKIE_NAME,
     NotionOAuthError,
@@ -325,6 +333,26 @@ def _clear_slack_state_cookie(response: Response) -> None:
     )
 
 
+def _set_lark_state_cookie(response: Response, nonce: str) -> None:
+    secure, _ = _cookie_security()
+    response.set_cookie(
+        key=LARK_STATE_COOKIE_NAME,
+        value=nonce,
+        max_age=STATE_TTL_SECONDS,
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+        path="/dashboard/api/lark",
+    )
+
+
+def _clear_lark_state_cookie(response: Response) -> None:
+    secure, _ = _cookie_security()
+    response.delete_cookie(
+        LARK_STATE_COOKIE_NAME, path="/dashboard/api/lark", samesite="lax", secure=secure
+    )
+
+
 def _set_notion_state_cookie(response: Response, nonce: str) -> None:
     secure, _ = _cookie_security()
     response.set_cookie(
@@ -431,6 +459,7 @@ async def me(session: dict[str, Any] = _SESSION_DEP) -> dict[str, Any]:
         "avatar_url": session.get("avatar_url"),
         "is_admin": _session_is_admin(session),
         "slack_oauth_enabled": slack_oauth_configured(),
+        "lark_oauth_enabled": lark_oauth_configured(),
     }
 
 
@@ -642,6 +671,72 @@ async def slack_callback(
 
     response = RedirectResponse(redirect_to, status_code=302)
     _clear_slack_state_cookie(response)
+    return response
+
+
+@router.get("/lark/login")
+async def lark_login(
+    _session: dict[str, Any] = _SESSION_DEP,
+) -> RedirectResponse:
+    if not lark_oauth_configured():
+        raise HTTPException(500, "Lark OAuth is not configured")
+    redirect_uri = f"{_api_base_url()}/dashboard/api/lark/callback"
+    nonce = new_state_nonce()
+    state = issue_state(
+        redirect_to=f"{_frontend_base_url()}/my-settings",
+        nonce_hash=hash_state_nonce(nonce),
+    )
+    response = RedirectResponse(
+        build_lark_authorize_url(redirect_uri=redirect_uri, state=state),
+        status_code=302,
+    )
+    _set_lark_state_cookie(response, nonce)
+    return response
+
+
+@router.get("/lark/callback")
+async def lark_callback(
+    request: Request,
+    code: str,
+    state: str,
+    session: dict[str, Any] = _SESSION_DEP,
+) -> RedirectResponse:
+    state_payload = decode_state(state)
+    nonce_hash = state_payload.get("nonce_hash")
+    cookie_nonce = request.cookies.get(LARK_STATE_COOKIE_NAME)
+    if (
+        not isinstance(nonce_hash, str)
+        or not cookie_nonce
+        or not hmac.compare_digest(hash_state_nonce(cookie_nonce), nonce_hash)
+    ):
+        raise HTTPException(400, "oauth state mismatch — please retry")
+
+    redirect_to = sanitize_redirect_to(state_payload.get("redirect_to")) or _frontend_base_url()
+    redirect_uri = f"{_api_base_url()}/dashboard/api/lark/callback"
+    access_token = await exchange_lark_code(code, redirect_uri)
+    identity = await fetch_lark_identity(access_token)
+    verify_lark_tenant(identity)
+
+    work_email = session.get("email")
+    if not work_email:
+        existing = await get_mapping(session["sub"])
+        work_email = (existing or {}).get("work_email") or identity.email
+    if not isinstance(work_email, str) or not work_email:
+        raise HTTPException(400, "your GitHub session has no verified email to link")
+
+    await upsert_mapping(
+        github_login=session["sub"],
+        work_email=work_email,
+        lark_tenant_key=identity.tenant_key,
+        lark_open_id=identity.open_id,
+        lark_union_id=identity.union_id,
+        lark_display_name=identity.name,
+        source="lark_oauth",
+        status="active",
+    )
+
+    response = RedirectResponse(redirect_to, status_code=302)
+    _clear_lark_state_cookie(response)
     return response
 
 
