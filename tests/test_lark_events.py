@@ -95,6 +95,24 @@ async def test_missing_store_record_recovers_from_durable_claim(
 
 
 @pytest.mark.asyncio
+async def test_stale_reclaim_recovers_claim_created_before_store_write(
+    fake_store: _FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = datetime(2026, 8, 26, 1, 0, tzinfo=UTC)
+    monkeypatch.setattr(lark_events, "_now", lambda: current)
+    await claim_lark_event("evt-reclaim-crash", "thread-1")
+    current += timedelta(seconds=lark_events.LARK_EVENT_CLAIM_TIMEOUT_SECONDS + 1)
+    assert await lark_events._acquire_attempt_claim("evt-reclaim-crash", "thread-1", 2)
+    current += timedelta(seconds=lark_events.LARK_EVENT_CLAIM_TIMEOUT_SECONDS + 1)
+
+    result = await claim_lark_event("evt-reclaim-crash", "thread-1")
+
+    assert result.status == "claimed"
+    assert result.record.attempts == 3
+
+
+@pytest.mark.asyncio
 async def test_first_delivery_claims_and_second_delivery_skips(fake_store: _FakeStore) -> None:
     first = await claim_lark_event("evt-1", "thread-1")
     second = await claim_lark_event("evt-1", "thread-1")

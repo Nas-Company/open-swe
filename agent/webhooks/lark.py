@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -34,7 +35,11 @@ from agent.utils.lark import (
     reply_to_lark_message,
 )
 from agent.utils.lark_events import get_lark_event_record, mark_lark_event_dispatched
-from agent.utils.thread_ops import get_thread_active_status, queue_message_for_thread
+from agent.utils.thread_ops import (
+    get_thread_active_status,
+    queue_message_for_thread,
+    queued_message_exists,
+)
 from agent.webapp import (
     _AGENT_VERSION_METADATA,
     LANGGRAPH_URL,
@@ -252,10 +257,22 @@ async def process_lark_mention(event: LarkEvent) -> None:
         source_context={"lark_thread": lark_thread},
     )
 
+    client = get_client(url=LANGGRAPH_URL)
+    claim_record = await get_lark_event_record(event.event_id)
+    if claim_record and claim_record.attempts > 1:
+        existing_run_id = await _find_lark_event_run(client, thread_id, event.event_id)
+        if existing_run_id:
+            await mark_lark_event_dispatched(event.event_id, existing_run_id)
+            return
+        if await queued_message_exists(thread_id, event.event_id):
+            await mark_lark_event_dispatched(event.event_id, "queued")
+            return
+
     if await get_thread_active_status(thread_id):
         queued = await queue_message_for_thread(
             thread_id,
             {"source": "lark", "text": prompt, "images": image_blocks},
+            dedupe_id=event.event_id,
         )
         if not queued:
             raise RuntimeError("failed to queue Lark follow-up")
@@ -266,13 +283,6 @@ async def process_lark_mention(event: LarkEvent) -> None:
         await mark_lark_event_dispatched(event.event_id, "queued")
         return
 
-    client = get_client(url=LANGGRAPH_URL)
-    claim_record = await get_lark_event_record(event.event_id)
-    if claim_record and claim_record.attempts > 1:
-        existing_run_id = await _find_lark_event_run(client, thread_id, event.event_id)
-        if existing_run_id:
-            await mark_lark_event_dispatched(event.event_id, existing_run_id)
-            return
     await reply_to_lark_message(
         message.root_message_id,
         {"text": f"Working on `{repo['owner']}/{repo['name']}` now."},
@@ -355,10 +365,20 @@ async def process_lark_card_action(payload: dict[str, object]) -> dict[str, obje
         lock = _lark_approval_locks.setdefault((thread_id, action_id), asyncio.Lock())
         async with lock:
             if not await _claim_lark_action_once(client, thread_id, action_id):
+                if await _lark_followup_exists(client, thread_id, action_id):
+                    return _card_success(
+                        "Selection received. Open SWE will continue in this thread."
+                    )
                 return _card_error("That option was already selected.")
             resumed = False
             try:
-                resumed = await _dispatch_lark_followup(client, metadata, thread_id, response)
+                resumed = await _dispatch_lark_followup(
+                    client,
+                    metadata,
+                    thread_id,
+                    response,
+                    action_id=action_id,
+                )
                 if not resumed:
                     return _card_error("The option was selected, but Open SWE could not resume.")
             finally:
@@ -414,6 +434,10 @@ async def _process_workflow_card_decision(
     if record.get("status") == "pending" and _approval_expired(record):
         return _card_error("That workflow approval has expired. Trigger the push again.")
     if not await _claim_lark_action_once(client, thread_id, fingerprint):
+        if await _lark_followup_exists(client, thread_id, fingerprint):
+            return _card_success(
+                "Workflow decision received. Open SWE will continue in this thread."
+            )
         return _card_error("That workflow approval was already decided.")
 
     approved = decision == "approve"
@@ -435,7 +459,13 @@ async def _process_workflow_card_decision(
             if approved
             else "The workflow push was rejected. Do not push the workflow-file changes."
         )
-        resumed = await _dispatch_lark_followup(client, metadata, thread_id, instruction)
+        resumed = await _dispatch_lark_followup(
+            client,
+            metadata,
+            thread_id,
+            instruction,
+            action_id=fingerprint,
+        )
         if not resumed:
             return _card_error("The decision was saved, but Open SWE could not resume.")
         approvals[fingerprint]["lark_followup_dispatched"] = True
@@ -480,6 +510,8 @@ async def _process_plan_card_decision(
     if record.get("status") == "pending" and _approval_expired(record):
         return _card_error("That plan approval has expired. Ask Open SWE for a fresh plan card.")
     if not await _claim_lark_action_once(client, thread_id, fingerprint):
+        if await _lark_followup_exists(client, thread_id, fingerprint):
+            return _card_success("Plan decision received. Open SWE will continue in this thread.")
         return _card_error("That plan approval was already decided.")
     resumed = False
     try:
@@ -506,6 +538,7 @@ async def _process_plan_card_decision(
             metadata,
             thread_id,
             instruction,
+            action_id=fingerprint,
             plan_mode=decision != "approve",
         )
         if not resumed:
@@ -532,7 +565,7 @@ async def _claim_lark_action_once(client: object, thread_id: str, action_id: str
             thread_id=claim_id,
             if_exists="raise",
             metadata={"kind": "lark_internal_claim", "source_thread_id": thread_id},
-            ttl=10080,
+            ttl=max(1, math.ceil(LARK_APPROVAL_TTL_SECONDS / 60)),
         )
         return True
     except Exception as exc:  # noqa: BLE001
@@ -560,6 +593,7 @@ async def _dispatch_lark_followup(
     thread_id: str,
     text: str,
     *,
+    action_id: str,
     plan_mode: bool | None = None,
 ) -> bool:
     source_context = metadata.get("source_context")
@@ -574,20 +608,34 @@ async def _dispatch_lark_followup(
         "github_login": metadata.get("github_login"),
         "plan_mode": metadata.get("plan_mode") if plan_mode is None else plan_mode,
     }
-    if await get_thread_active_status(thread_id):
+    if await _lark_followup_exists(client, thread_id, action_id):
+        return True
+    if plan_mode is None and await get_thread_active_status(thread_id):
         return await queue_message_for_thread(
             thread_id,
-            {"source": "lark", "text": text, "plan_mode": configurable["plan_mode"]},
+            {"source": "lark", "text": text},
+            dedupe_id=action_id,
         )
     run = await dispatch_agent_run(
         thread_id,
         text,
         configurable,
         source="lark",
-        metadata=_AGENT_VERSION_METADATA,
+        metadata={**_AGENT_VERSION_METADATA, "lark_action_id": action_id},
         client=client,
     )
     return isinstance(run, dict) and isinstance(run.get("run_id"), str)
+
+
+async def _lark_followup_exists(client: object, thread_id: str, action_id: str) -> bool:
+    if await queued_message_exists(thread_id, action_id):
+        return True
+    runs = await client.runs.list(thread_id, limit=100)
+    for run in runs if isinstance(runs, list) else []:
+        metadata = run.get("metadata") if isinstance(run, dict) else None
+        if isinstance(metadata, dict) and metadata.get("lark_action_id") == action_id:
+            return True
+    return False
 
 
 def _approval_expired(record: dict[str, object]) -> bool:

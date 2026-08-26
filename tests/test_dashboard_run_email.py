@@ -19,10 +19,10 @@ class _FakeStore:
     async def put_item(self, namespace: list[str], key: str, value: dict[str, Any]) -> None:
         self.items[(tuple(namespace), key)] = value
 
-    async def search_items(self, namespace: list[str], *, limit: int = 1000):
+    async def search_items(self, namespace: list[str], *, limit: int = 1000, offset: int = 0):
         ns = tuple(namespace)
         items = [{"value": v} for (n, _k), v in self.items.items() if n == ns]
-        return {"items": items[:limit]}
+        return {"items": items[offset : offset + limit]}
 
 
 class _FakeClient:

@@ -170,6 +170,7 @@ def _configure_happy_path(monkeypatch: pytest.MonkeyPatch, event: LarkEvent) -> 
 
     monkeypatch.setattr(lark_webhook, "dispatch_agent_run", dispatch)
     monkeypatch.setattr(lark_webhook, "get_lark_event_record", AsyncMock(return_value=None))
+    monkeypatch.setattr(lark_webhook, "queued_message_exists", AsyncMock(return_value=False))
     monkeypatch.setattr(lark_webhook, "reply_to_lark_message", AsyncMock())
     monkeypatch.setattr(lark_webhook, "mark_lark_event_dispatched", AsyncMock())
     return calls
@@ -200,6 +201,32 @@ async def test_retry_reconciles_existing_event_run_without_dispatching_again(
     dispatch.assert_not_awaited()
     lark_webhook.mark_lark_event_dispatched.assert_awaited_once_with(event.event_id, "run-existing")
     assert "thread_id" not in calls
+
+
+@pytest.mark.asyncio
+async def test_retry_reconciles_existing_queued_event_before_busy_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = _event(text="review https://github.com/Nas-Company/nas-e2e")
+    _configure_happy_path(monkeypatch, event)
+    monkeypatch.setattr(
+        lark_webhook,
+        "get_lark_event_record",
+        AsyncMock(return_value=SimpleNamespace(attempts=2)),
+    )
+    monkeypatch.setattr(lark_webhook, "_find_lark_event_run", AsyncMock(return_value=None))
+    monkeypatch.setattr(lark_webhook, "queued_message_exists", AsyncMock(return_value=True))
+    monkeypatch.setattr(lark_webhook, "get_thread_active_status", AsyncMock(return_value=True))
+    queue = AsyncMock()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(lark_webhook, "queue_message_for_thread", queue)
+    monkeypatch.setattr(lark_webhook, "dispatch_agent_run", dispatch)
+
+    await lark_webhook.process_lark_mention(event)
+
+    queue.assert_not_awaited()
+    dispatch.assert_not_awaited()
+    lark_webhook.mark_lark_event_dispatched.assert_awaited_once_with(event.event_id, "queued")
 
 
 @pytest.mark.asyncio

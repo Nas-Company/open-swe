@@ -23,13 +23,15 @@ class _FakeStore:
     ) -> None:
         self.items[(tuple(namespace), key)] = dict(value)
 
-    async def search_items(self, namespace: list[str], *, limit: int = 1000) -> dict[str, Any]:
+    async def search_items(
+        self, namespace: list[str], *, limit: int = 1000, offset: int = 0
+    ) -> dict[str, Any]:
         items = [
             {"value": dict(value)}
             for (stored_namespace, _), value in self.items.items()
             if stored_namespace == tuple(namespace)
         ]
-        return {"items": items[:limit]}
+        return {"items": items[offset : offset + limit]}
 
 
 class _FakeClient:

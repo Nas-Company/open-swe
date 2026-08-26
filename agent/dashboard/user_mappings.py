@@ -217,13 +217,24 @@ def _record_from_item(item: Any) -> dict[str, Any] | None:
 
 
 async def _load_all_records() -> list[dict[str, Any]]:
-    result = await _client().store.search_items(USER_MAPPINGS_NAMESPACE, limit=1000)
-    items = result.get("items") if isinstance(result, dict) else getattr(result, "items", [])
     out: list[dict[str, Any]] = []
-    for item in items or []:
-        record = _record_from_item(item)
-        if record:
-            out.append(record)
+    offset = 0
+    page_size = 1000
+    while True:
+        result = await _client().store.search_items(
+            USER_MAPPINGS_NAMESPACE,
+            limit=page_size,
+            offset=offset,
+        )
+        items = result.get("items") if isinstance(result, dict) else getattr(result, "items", [])
+        page = list(items or [])
+        for item in page:
+            record = _record_from_item(item)
+            if record:
+                out.append(record)
+        if len(page) < page_size:
+            break
+        offset += len(page)
     return out
 
 

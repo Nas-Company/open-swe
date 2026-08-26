@@ -23,10 +23,10 @@ class _FakeStore:
     async def delete_item(self, namespace: list[str], key: str) -> None:
         self.items.pop((tuple(namespace), key), None)
 
-    async def search_items(self, namespace: list[str], *, limit: int = 1000):
+    async def search_items(self, namespace: list[str], *, limit: int = 1000, offset: int = 0):
         ns = tuple(namespace)
         items = [{"value": v} for (n, _k), v in self.items.items() if n == ns]
-        return {"items": items[:limit]}
+        return {"items": items[offset : offset + limit]}
 
 
 class _FakeClient:
@@ -89,6 +89,26 @@ async def test_ambiguous_active_email_and_lark_id_fail_closed(fake_store: _FakeS
 
     assert await um.login_for_email("shared@x.com") is None
     assert await um.login_for_lark_id("tenant", "ou_shared") is None
+
+
+@pytest.mark.asyncio
+async def test_mapping_refresh_paginates_before_deciding_uniqueness(fake_store: _FakeStore) -> None:
+    for index in range(1001):
+        email = "shared@x.com" if index in {0, 1000} else f"user-{index}@x.com"
+        await fake_store.put_item(
+            um.USER_MAPPINGS_NAMESPACE,
+            f"user-{index}",
+            {
+                "github_login": f"user-{index}",
+                "work_email": email,
+                "status": "active",
+            },
+        )
+    um.clear_cache()
+
+    await um.refresh_cache()
+
+    assert await um.login_for_email("shared@x.com") is None
 
 
 @pytest.mark.asyncio

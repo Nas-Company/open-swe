@@ -108,6 +108,7 @@ def _configure(
     monkeypatch.setattr(lark_webhook, "get_thread_active_status", AsyncMock(return_value=False))
     monkeypatch.setattr(lark_webhook, "queue_message_for_thread", AsyncMock(return_value=True))
     monkeypatch.setattr(lark_webhook, "_release_lark_action_claim", AsyncMock())
+    monkeypatch.setattr(lark_webhook, "_lark_followup_exists", AsyncMock(return_value=False))
     monkeypatch.setattr(lark_webhook, "_claim_lark_action_once", AsyncMock(return_value=True))
     monkeypatch.setattr(
         lark_webhook,
@@ -298,6 +299,34 @@ async def test_plan_rejection_preserves_plan_mode(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
+async def test_active_plan_approval_interrupts_with_non_plan_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = _metadata()
+    metadata["plan_mode"] = True
+    metadata["lark_plan_approvals"] = {
+        FINGERPRINT: {
+            "fingerprint": FINGERPRINT,
+            "status": "pending",
+            "requested_at": datetime.now(UTC).isoformat(),
+        }
+    }
+    _, dispatch = _configure(monkeypatch, metadata)
+    queue = AsyncMock(return_value=True)
+    monkeypatch.setattr(lark_webhook, "get_thread_active_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(lark_webhook, "queue_message_for_thread", queue)
+    action = _action()
+    action["event"]["action"]["value"]["type"] = "plan_approval"
+
+    result = await lark_webhook.process_lark_card_action(action)
+
+    assert result["toast"]["type"] == "success"
+    dispatch.assert_awaited_once()
+    assert dispatch.await_args.args[2]["plan_mode"] is False
+    queue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_active_thread_queues_card_followup_instead_of_interrupting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -360,6 +389,27 @@ async def test_option_action_dispatches_selected_response_once(
     assert result["toast"]["type"] == "success"
     dispatch.assert_awaited_once()
     assert dispatch.await_args.args[1] == "Use repository one"
+
+
+@pytest.mark.asyncio
+async def test_option_retry_reconciles_already_created_followup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, dispatch = _configure(monkeypatch, _metadata())
+    monkeypatch.setattr(lark_webhook, "_claim_lark_action_once", AsyncMock(return_value=False))
+    monkeypatch.setattr(lark_webhook, "_lark_followup_exists", AsyncMock(return_value=True))
+    action = _action()
+    action["event"]["action"]["value"] = {
+        "type": "open_swe_option",
+        "thread_id": THREAD_ID,
+        "action_id": "option-1",
+        "response": "Use repository one",
+    }
+
+    result = await lark_webhook.process_lark_card_action(action)
+
+    assert result["toast"]["type"] == "success"
+    dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -58,25 +58,30 @@ async def claim_lark_event(event_id: str, thread_id: str) -> ClaimResult:
             record = await _get_attempt_claim_record(event_id, 1) or claimed
             await _put_record(record)
 
-        if record.status == "dispatched":
-            return ClaimResult("dispatched", record)
-        if record.attempts >= LARK_EVENT_MAX_ATTEMPTS:
-            return ClaimResult("exhausted", record)
-        if record.status == "dispatching" and not _claim_is_stale(record):
-            return ClaimResult("in_progress", record)
+        while True:
+            if record.status == "dispatched":
+                return ClaimResult("dispatched", record)
+            if record.attempts >= LARK_EVENT_MAX_ATTEMPTS:
+                return ClaimResult("exhausted", record)
+            if record.status == "dispatching" and not _claim_is_stale(record):
+                return ClaimResult("in_progress", record)
 
-        next_attempt = record.attempts + 1
-        claimed = _new_claim(event_id, thread_id, attempts=next_attempt)
-        if not await _acquire_attempt_claim(
-            event_id,
-            thread_id,
-            next_attempt,
-            record=claimed,
-        ):
-            latest = await _get_record(event_id)
-            return ClaimResult("in_progress", latest or claimed)
-        await _put_record(claimed)
-        return ClaimResult("claimed", claimed)
+            next_attempt = record.attempts + 1
+            claimed = _new_claim(event_id, thread_id, attempts=next_attempt)
+            if await _acquire_attempt_claim(
+                event_id,
+                thread_id,
+                next_attempt,
+                record=claimed,
+            ):
+                await _put_record(claimed)
+                return ClaimResult("claimed", claimed)
+            recovered = await _get_attempt_claim_record(event_id, next_attempt)
+            if recovered is None:
+                latest = await _get_record(event_id)
+                return ClaimResult("in_progress", latest or claimed)
+            record = recovered
+            await _put_record(record)
 
 
 async def get_lark_event_record(event_id: str) -> LarkEventRecord | None:
