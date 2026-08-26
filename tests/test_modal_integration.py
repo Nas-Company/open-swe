@@ -5,6 +5,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
+from modal import exception as modal_exception
 
 from agent.integrations.modal import (
     BUN_VERSION,
@@ -91,6 +92,65 @@ def test_binary_transfer_uses_current_modal_filesystem_api() -> None:
     sandbox.open.assert_not_called()
     sandbox.filesystem.read_bytes.assert_called_once_with("/tmp/input.bundle")
     sandbox.filesystem.write_bytes.assert_called_once_with(b"safe", "/tmp/output.bundle")
+
+
+def test_backend_file_transfer_uses_current_modal_filesystem_api() -> None:
+    sandbox = MagicMock(object_id="sb-current-filesystem")
+    sandbox.filesystem.read_bytes.return_value = b"downloaded"
+    backend = AuthenticatedModalSandbox(sandbox=sandbox)
+
+    downloads = backend.download_files(["/workspace/input.txt"])
+    uploads = backend.upload_files([("/workspace/output.txt", b"uploaded")])
+
+    assert downloads[0].path == "/workspace/input.txt"
+    assert downloads[0].content == b"downloaded"
+    assert downloads[0].error is None
+    assert uploads[0].path == "/workspace/output.txt"
+    assert uploads[0].error is None
+    sandbox.filesystem.write_bytes.assert_called_once_with(b"uploaded", "/workspace/output.txt")
+
+
+@pytest.mark.parametrize(
+    ("exception", "expected_error"),
+    [
+        (modal_exception.SandboxFilesystemNotFoundError(), "file_not_found"),
+        (modal_exception.SandboxFilesystemIsADirectoryError(), "is_directory"),
+        (modal_exception.SandboxFilesystemPermissionError(), "permission_denied"),
+    ],
+)
+def test_backend_download_maps_modal_filesystem_errors(
+    exception: Exception, expected_error: str
+) -> None:
+    sandbox = MagicMock(object_id="sb-current-filesystem")
+    sandbox.filesystem.read_bytes.side_effect = exception
+    backend = AuthenticatedModalSandbox(sandbox=sandbox)
+
+    result = backend.download_files(["/workspace/input.txt"])[0]
+
+    assert result.path == "/workspace/input.txt"
+    assert result.content is None
+    assert result.error == expected_error
+
+
+@pytest.mark.parametrize(
+    ("exception", "expected_error"),
+    [
+        (modal_exception.SandboxFilesystemNotFoundError(), "file_not_found"),
+        (modal_exception.SandboxFilesystemIsADirectoryError(), "is_directory"),
+        (modal_exception.SandboxFilesystemPermissionError(), "permission_denied"),
+    ],
+)
+def test_backend_upload_maps_modal_filesystem_errors(
+    exception: Exception, expected_error: str
+) -> None:
+    sandbox = MagicMock(object_id="sb-current-filesystem")
+    sandbox.filesystem.write_bytes.side_effect = exception
+    backend = AuthenticatedModalSandbox(sandbox=sandbox)
+
+    result = backend.upload_files([("/workspace/output.txt", b"uploaded")])[0]
+
+    assert result.path == "/workspace/output.txt"
+    assert result.error == expected_error
 
 
 def test_modal_config_reads_lifecycle_and_resource_settings() -> None:
